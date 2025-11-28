@@ -94,6 +94,9 @@ class MockPendingUpdate : public PendingUpdateTyped<MockSnapshot> {
   bool ApplyCalled() const { return apply_called_; }
   bool CommitCalled() const { return commit_called_; }
 
+  // Test helper to expose protected AddError(Error) method
+  void TestAddExistingError(Error err) { AddError(std::move(err)); }
+
  private:
   std::string name_;
   int64_t id_ = 0;
@@ -199,6 +202,19 @@ TEST(PendingUpdateTest, ErrorCollectionPartialValidation) {
   auto result = update.Apply();
   EXPECT_THAT(result, IsError(ErrorKind::kValidationFailed));
   EXPECT_THAT(result, HasErrorMessage("ID must be non-negative"));
+}
+
+TEST(PendingUpdateTest, ErrorCollectionAddErrorOverload) {
+  // Test the AddError(Error err) overload for adding existing error objects
+  MockPendingUpdate update;
+
+  // Create an error externally and add it
+  Error external_error{ErrorKind::kInvalidArgument, "External error message"};
+  update.TestAddExistingError(std::move(external_error));
+
+  auto result = update.Apply();
+  EXPECT_THAT(result, IsError(ErrorKind::kValidationFailed));
+  EXPECT_THAT(result, HasErrorMessage("External error message"));
 }
 
 }  // namespace iceberg
