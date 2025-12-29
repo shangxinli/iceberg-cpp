@@ -24,12 +24,16 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <string>
 #include <vector>
 
 #include "iceberg/arrow_c_data.h"
+#include "iceberg/file_format.h"
 #include "iceberg/iceberg_export.h"
 #include "iceberg/manifest/manifest_entry.h"
 #include "iceberg/result.h"
+#include "iceberg/type_fwd.h"
 
 namespace iceberg {
 
@@ -67,6 +71,11 @@ class ICEBERG_EXPORT FileWriter {
   virtual Status Close() = 0;
 
   /// \brief File metadata for all files produced by the writer.
+  ///
+  /// \note The following features from Java are not yet supported:
+  /// - Encryption key metadata (EncryptionKeyMetadata)
+  /// - Split offsets for data files
+  /// - Referenced data files tracking for position deletes
   struct ICEBERG_EXPORT WriteResult {
     /// Usually a writer produces a single data or delete file.
     /// Position delete writer may produce multiple file-scoped delete files.
@@ -81,6 +90,174 @@ class ICEBERG_EXPORT FileWriter {
   ///
   /// \return Result containing the write result or an error.
   virtual Result<WriteResult> Metadata() = 0;
+};
+
+//=============================================================================
+// DataWriter
+//=============================================================================
+
+/// \brief Options for creating a DataWriter.
+///
+/// \note The following features from Java DataWriter are not yet supported:
+/// - Encryption key metadata (uses FileIO instead of EncryptedOutputFile)
+/// - Metrics collection and reporting
+/// - Split offsets tracking
+struct ICEBERG_EXPORT DataWriterOptions {
+  std::string path;
+  std::shared_ptr<Schema> schema;
+  std::shared_ptr<PartitionSpec> spec;
+  PartitionValues partition;
+  FileFormatType format = FileFormatType::kParquet;
+  std::shared_ptr<FileIO> io;
+  std::optional<int32_t> sort_order_id;
+  std::shared_ptr<class WriterProperties> properties;
+};
+
+/// \brief Writer for Iceberg data files.
+class ICEBERG_EXPORT DataWriter : public FileWriter {
+ public:
+  static Result<std::unique_ptr<DataWriter>> Make(const DataWriterOptions& options);
+  ~DataWriter() override;
+
+  Status Write(ArrowArray* data) override;
+  Result<int64_t> Length() const override;
+  Status Close() override;
+  Result<WriteResult> Metadata() override;
+
+ private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+  explicit DataWriter(std::unique_ptr<Impl> impl);
+};
+
+//=============================================================================
+// PositionDeleteWriter
+//=============================================================================
+
+/// \brief Options for creating a PositionDeleteWriter.
+///
+/// \note The following features from Java PositionDeleteWriter are not yet supported:
+/// - Encryption key metadata
+/// - Referenced data files tracking (CharSequenceSet referencedDataFiles)
+/// - Metrics stripping for multi-file deletes
+/// - Split offsets tracking
+struct ICEBERG_EXPORT PositionDeleteWriterOptions {
+  std::string path;
+  std::shared_ptr<Schema> schema;
+  std::shared_ptr<PartitionSpec> spec;
+  PartitionValues partition;
+  FileFormatType format = FileFormatType::kParquet;
+  std::shared_ptr<FileIO> io;
+  std::shared_ptr<Schema> row_schema;  // Optional row data schema
+  std::shared_ptr<class WriterProperties> properties;
+};
+
+/// \brief Writer for Iceberg position delete files.
+class ICEBERG_EXPORT PositionDeleteWriter : public FileWriter {
+ public:
+  static Result<std::unique_ptr<PositionDeleteWriter>> Make(
+      const PositionDeleteWriterOptions& options);
+  ~PositionDeleteWriter() override;
+
+  Status Write(ArrowArray* data) override;
+  Status WriteDelete(std::string_view file_path, int64_t pos);
+  Result<int64_t> Length() const override;
+  Status Close() override;
+  Result<WriteResult> Metadata() override;
+
+ private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+  explicit PositionDeleteWriter(std::unique_ptr<Impl> impl);
+};
+
+//=============================================================================
+// EqualityDeleteWriter
+//=============================================================================
+
+/// \brief Options for creating an EqualityDeleteWriter.
+///
+/// \note The following features from Java EqualityDeleteWriter are not yet supported:
+/// - Encryption key metadata
+/// - Metrics collection and reporting
+/// - Split offsets tracking
+struct ICEBERG_EXPORT EqualityDeleteWriterOptions {
+  std::string path;
+  std::shared_ptr<Schema> schema;
+  std::shared_ptr<PartitionSpec> spec;
+  PartitionValues partition;
+  FileFormatType format = FileFormatType::kParquet;
+  std::shared_ptr<FileIO> io;
+  std::vector<int32_t> equality_field_ids;
+  std::optional<int32_t> sort_order_id;
+  std::shared_ptr<class WriterProperties> properties;
+};
+
+/// \brief Writer for Iceberg equality delete files.
+class ICEBERG_EXPORT EqualityDeleteWriter : public FileWriter {
+ public:
+  static Result<std::unique_ptr<EqualityDeleteWriter>> Make(
+      const EqualityDeleteWriterOptions& options);
+  ~EqualityDeleteWriter() override;
+
+  Status Write(ArrowArray* data) override;
+  Result<int64_t> Length() const override;
+  Status Close() override;
+  Result<WriteResult> Metadata() override;
+
+  const std::vector<int32_t>& equality_field_ids() const;
+
+ private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+  explicit EqualityDeleteWriter(std::unique_ptr<Impl> impl);
+};
+
+//=============================================================================
+// FileWriterFactory
+//=============================================================================
+
+/// \brief Factory for creating Iceberg file writers.
+///
+/// \note Differences from Java FileWriterFactory:
+/// - Java uses EncryptedOutputFile parameter, C++ uses path + FileIO
+/// - C++ factory has state (schema, spec, io) configured once, reused for all writers
+/// - Java FileWriterFactory is an interface, C++ is a concrete class with configuration
+/// - C++ provides SetEqualityDeleteConfig() and SetPositionDeleteRowSchema() for customization
+///
+/// \warning This class is NOT thread-safe. Similar to the Java implementation,
+/// FileWriterFactory does not provide internal synchronization. If multiple threads
+/// need to create writers concurrently, either:
+/// - Each thread should have its own FileWriterFactory instance, OR
+/// - External synchronization must be used to protect access to the factory
+///
+/// Calling SetEqualityDeleteConfig() or SetPositionDeleteRowSchema() concurrently
+/// with any New* method will result in undefined behavior due to data races.
+class ICEBERG_EXPORT FileWriterFactory {
+ public:
+  FileWriterFactory(std::shared_ptr<Schema> schema, std::shared_ptr<PartitionSpec> spec,
+                    std::shared_ptr<FileIO> io,
+                    std::shared_ptr<class WriterProperties> properties = nullptr);
+  ~FileWriterFactory();
+
+  void SetEqualityDeleteConfig(std::shared_ptr<Schema> eq_delete_schema,
+                                std::vector<int32_t> equality_field_ids);
+  void SetPositionDeleteRowSchema(std::shared_ptr<Schema> pos_delete_row_schema);
+
+  Result<std::unique_ptr<DataWriter>> NewDataWriter(
+      std::string path, FileFormatType format, PartitionValues partition,
+      std::optional<int32_t> sort_order_id = std::nullopt);
+
+  Result<std::unique_ptr<PositionDeleteWriter>> NewPositionDeleteWriter(
+      std::string path, FileFormatType format, PartitionValues partition);
+
+  Result<std::unique_ptr<EqualityDeleteWriter>> NewEqualityDeleteWriter(
+      std::string path, FileFormatType format, PartitionValues partition,
+      std::optional<int32_t> sort_order_id = std::nullopt);
+
+ private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace iceberg
