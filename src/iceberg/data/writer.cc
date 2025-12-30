@@ -19,6 +19,8 @@
 
 #include "iceberg/data/writer.h"
 
+#include "iceberg/data/position_delete_writer.h"
+
 namespace iceberg {
 
 FileWriter::~FileWriter() = default;
@@ -66,58 +68,6 @@ Status DataWriter::Close() {
 
 Result<FileWriter::WriteResult> DataWriter::Metadata() {
   return NotImplemented("DataWriter::Metadata not yet implemented");
-}
-
-//=============================================================================
-// PositionDeleteWriter::Impl
-//=============================================================================
-
-class PositionDeleteWriter::Impl {
- public:
-  explicit Impl(const PositionDeleteWriterOptions& options) : options_(options) {}
-
-  PositionDeleteWriterOptions options_;
-
-  // TODO: Add the following when implementing:
-  // - FileAppender for position delete format (file path + position columns)
-  // - CharSequenceSet or equivalent for tracking referenced data files
-  // - Metrics collection with field stripping for multi-file deletes
-  // - Split offsets tracking
-  // - Encryption key metadata handling
-};
-
-//=============================================================================
-// PositionDeleteWriter
-//=============================================================================
-
-Result<std::unique_ptr<PositionDeleteWriter>> PositionDeleteWriter::Make(
-    const PositionDeleteWriterOptions& options) {
-  return NotImplemented("PositionDeleteWriter implementation not yet available");
-}
-
-PositionDeleteWriter::PositionDeleteWriter(std::unique_ptr<Impl> impl)
-    : impl_(std::move(impl)) {}
-
-PositionDeleteWriter::~PositionDeleteWriter() = default;
-
-Status PositionDeleteWriter::Write(ArrowArray* data) {
-  return NotImplemented("PositionDeleteWriter::Write not yet implemented");
-}
-
-Status PositionDeleteWriter::WriteDelete(std::string_view file_path, int64_t pos) {
-  return NotImplemented("PositionDeleteWriter::WriteDelete not yet implemented");
-}
-
-Result<int64_t> PositionDeleteWriter::Length() const {
-  return NotImplemented("PositionDeleteWriter::Length not yet implemented");
-}
-
-Status PositionDeleteWriter::Close() {
-  return NotImplemented("PositionDeleteWriter::Close not yet implemented");
-}
-
-Result<FileWriter::WriteResult> PositionDeleteWriter::Metadata() {
-  return NotImplemented("PositionDeleteWriter::Metadata not yet implemented");
 }
 
 //=============================================================================
