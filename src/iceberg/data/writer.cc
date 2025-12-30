@@ -19,6 +19,10 @@
 
 #include "iceberg/data/writer.h"
 
+#include "iceberg/file_writer.h"
+#include "iceberg/manifest/manifest_entry.h"
+#include "iceberg/util/conversions.h"
+
 namespace iceberg {
 
 FileWriter::~FileWriter() = default;
@@ -129,12 +133,8 @@ class EqualityDeleteWriter::Impl {
   explicit Impl(const EqualityDeleteWriterOptions& options) : options_(options) {}
 
   EqualityDeleteWriterOptions options_;
-
-  // TODO: Add the following when implementing:
-  // - FileAppender for equality delete format
-  // - Metrics collection
-  // - Split offsets tracking
-  // - Encryption key metadata handling
+  std::unique_ptr<Writer> format_writer_;
+  bool closed_ = false;
 };
 
 //=============================================================================
@@ -143,7 +143,34 @@ class EqualityDeleteWriter::Impl {
 
 Result<std::unique_ptr<EqualityDeleteWriter>> EqualityDeleteWriter::Make(
     const EqualityDeleteWriterOptions& options) {
-  return NotImplemented("EqualityDeleteWriter implementation not yet available");
+  // Validate required fields
+  if (options.path.empty()) {
+    return InvalidArgument("EqualityDeleteWriter path cannot be empty");
+  }
+  if (!options.schema) {
+    return InvalidArgument("EqualityDeleteWriter schema cannot be null");
+  }
+  if (!options.io) {
+    return InvalidArgument("EqualityDeleteWriter io cannot be null");
+  }
+  if (options.equality_field_ids.empty()) {
+    return InvalidArgument("EqualityDeleteWriter equality_field_ids cannot be empty");
+  }
+
+  auto impl = std::make_unique<Impl>(options);
+
+  // Create WriterOptions for the format-specific writer
+  WriterOptions writer_options;
+  writer_options.path = options.path;
+  writer_options.schema = options.schema;
+  writer_options.io = options.io;
+  writer_options.properties = options.properties;
+
+  // Create format-specific writer via registry
+  ICEBERG_ASSIGN_OR_RAISE(impl->format_writer_,
+                          WriterFactoryRegistry::Open(options.format, writer_options));
+
+  return std::unique_ptr<EqualityDeleteWriter>(new EqualityDeleteWriter(std::move(impl)));
 }
 
 EqualityDeleteWriter::EqualityDeleteWriter(std::unique_ptr<Impl> impl)
@@ -152,19 +179,84 @@ EqualityDeleteWriter::EqualityDeleteWriter(std::unique_ptr<Impl> impl)
 EqualityDeleteWriter::~EqualityDeleteWriter() = default;
 
 Status EqualityDeleteWriter::Write(ArrowArray* data) {
-  return NotImplemented("EqualityDeleteWriter::Write not yet implemented");
+  if (impl_->closed_) {
+    return Invalid("Cannot write to a closed EqualityDeleteWriter");
+  }
+  if (!data) {
+    return InvalidArgument("Cannot write null data to EqualityDeleteWriter");
+  }
+  // Delegate to format writer
+  return impl_->format_writer_->Write(data);
 }
 
 Result<int64_t> EqualityDeleteWriter::Length() const {
-  return NotImplemented("EqualityDeleteWriter::Length not yet implemented");
+  return impl_->format_writer_->length();
 }
 
 Status EqualityDeleteWriter::Close() {
-  return NotImplemented("EqualityDeleteWriter::Close not yet implemented");
+  if (!impl_->closed_) {
+    ICEBERG_RETURN_UNEXPECTED(impl_->format_writer_->Close());
+    impl_->closed_ = true;
+  }
+  return {};
 }
 
 Result<FileWriter::WriteResult> EqualityDeleteWriter::Metadata() {
-  return NotImplemented("EqualityDeleteWriter::Metadata not yet implemented");
+  if (!impl_->closed_) {
+    return Invalid("Writer must be closed before getting metadata");
+  }
+
+  WriteResult result;
+  auto data_file = std::make_shared<DataFile>();
+
+  // Set equality delete specific fields
+  data_file->content = DataFile::Content::kEqualityDeletes;
+  data_file->file_path = impl_->options_.path;
+  data_file->file_format = impl_->options_.format;
+  data_file->partition = impl_->options_.partition;
+  data_file->equality_ids = impl_->options_.equality_field_ids;
+  data_file->sort_order_id = impl_->options_.sort_order_id;
+
+  // Get metrics from format writer
+  ICEBERG_ASSIGN_OR_RAISE(auto metrics, impl_->format_writer_->metrics());
+  if (metrics.row_count.has_value()) {
+    data_file->record_count = *metrics.row_count;
+  }
+
+  // Get file size
+  ICEBERG_ASSIGN_OR_RAISE(auto length, impl_->format_writer_->length());
+  data_file->file_size_in_bytes = length;
+
+  // Get split offsets
+  data_file->split_offsets = impl_->format_writer_->split_offsets();
+
+  // Copy metrics maps (convert from unordered_map to map)
+  for (const auto& [field_id, size] : metrics.column_sizes) {
+    data_file->column_sizes[field_id] = size;
+  }
+  for (const auto& [field_id, count] : metrics.value_counts) {
+    data_file->value_counts[field_id] = count;
+  }
+  for (const auto& [field_id, count] : metrics.null_value_counts) {
+    data_file->null_value_counts[field_id] = count;
+  }
+  for (const auto& [field_id, count] : metrics.nan_value_counts) {
+    data_file->nan_value_counts[field_id] = count;
+  }
+
+  // Convert Literal bounds to binary format
+  for (const auto& [field_id, literal] : metrics.lower_bounds) {
+    ICEBERG_ASSIGN_OR_RAISE(auto bytes, Conversions::ToBytes(literal));
+    data_file->lower_bounds[field_id] = std::move(bytes);
+  }
+
+  for (const auto& [field_id, literal] : metrics.upper_bounds) {
+    ICEBERG_ASSIGN_OR_RAISE(auto bytes, Conversions::ToBytes(literal));
+    data_file->upper_bounds[field_id] = std::move(bytes);
+  }
+
+  result.data_files.push_back(data_file);
+  return result;
 }
 
 const std::vector<int32_t>& EqualityDeleteWriter::equality_field_ids() const {
