@@ -21,14 +21,20 @@
 
 #include <filesystem>
 
+#include <arrow/buffer.h>
+#include <arrow/io/interfaces.h>
 #include <gtest/gtest.h>
 
+#include "iceberg/arrow/arrow_io_internal.h"
+#include "iceberg/arrow/arrow_io_util.h"
+#include "iceberg/encryption/encrypting_file_io.h"
 #include "iceberg/encryption/encryption_register.h"
 #include "iceberg/encryption/in_memory_kms.h"
 #include "iceberg/snapshot.h"
 #include "iceberg/table_metadata.h"
 #include "iceberg/test/encryption_test_util.h"
 #include "iceberg/test/matchers.h"
+#include "iceberg/test/temp_file_test_base.h"
 #include "iceberg/test/test_resource.h"
 
 namespace iceberg {
@@ -207,6 +213,45 @@ TEST(EncryptionManagerRegistryTest, ValidatesOptions) {
   EXPECT_THAT(EncryptionManagerRegistry::Make(
                   {.table_key_id = "keyA", .data_key_length = 20, .kms = MakeKms()}),
               IsError(ErrorKind::kInvalidArgument));
+}
+
+class EncryptingFileIOStreamTest : public TempFileTestBase {};
+
+TEST_F(EncryptingFileIOStreamTest, WritesAndReadsAesGcmStreams) {
+  auto kms = MakeKms();
+  ICEBERG_UNWRAP_OR_FAIL(auto manager, StandardEncryptionManager::Make(
+                                           {.table_key_id = "keyA", .kms = kms}));
+  std::shared_ptr<FileIO> local_io(arrow::MakeLocalFileIO());
+  auto io = std::make_shared<EncryptingFileIO>(local_io, manager);
+
+  ICEBERG_UNWRAP_OR_FAIL(auto key_metadata, manager->NewKeyMetadata());
+  ICEBERG_UNWRAP_OR_FAIL(auto write_view, io->ForEncryptedWrite(key_metadata));
+  auto path = CreateNewTempFilePath();
+  std::string content(3 * 1024 * 1024 / 2, 'x');
+  ASSERT_THAT(write_view->WriteFile(path, content), IsOk());
+  auto stored = static_cast<int64_t>(std::filesystem::file_size(path));
+  EXPECT_EQ(stored, 8 + content.size() + 2 * 28);
+
+  // Reading needs the stored length in the key metadata
+  ICEBERG_UNWRAP_OR_FAIL(
+      auto read_view,
+      EncryptingFileIO::ForFile(io, key_metadata.WithFileLength(stored).Serialize()));
+  ICEBERG_UNWRAP_OR_FAIL(auto read, read_view->ReadFile(path, std::nullopt));
+  EXPECT_EQ(read, content);
+
+  // Through the Arrow adapter used by the Avro and Parquet readers
+  ICEBERG_UNWRAP_OR_FAIL(auto arrow_file,
+                         arrow::OpenArrowInputStream(read_view, path, stored));
+  EXPECT_EQ(arrow_file->GetSize().ValueOrDie(), static_cast<int64_t>(content.size()));
+  auto buffer = arrow_file->ReadAt(1024 * 1024 - 2, 4).ValueOrDie();
+  EXPECT_EQ(buffer->ToString(), "xxxx");
+
+  // Plain files of an encrypted table go straight to the Arrow file system
+  auto plain_path = CreateNewTempFilePath();
+  ASSERT_THAT(io->WriteFile(plain_path, "plain"), IsOk());
+  ICEBERG_UNWRAP_OR_FAIL(auto plain_file,
+                         arrow::OpenArrowInputStream(io, plain_path, std::nullopt));
+  EXPECT_EQ(plain_file->GetSize().ValueOrDie(), 5);
 }
 
 }  // namespace iceberg

@@ -35,6 +35,7 @@
 #include "iceberg/arrow/arrow_io_internal.h"
 #include "iceberg/arrow/arrow_io_util.h"
 #include "iceberg/arrow/arrow_status_internal.h"
+#include "iceberg/encryption/encrypting_file_io.h"
 #include "iceberg/util/macros.h"
 
 namespace iceberg::arrow {
@@ -481,6 +482,13 @@ class ArrowOutputFile : public OutputFile {
   std::string path_;
 };
 
+const std::shared_ptr<FileIO>& PlainFileIO(const std::shared_ptr<FileIO>& io) {
+  if (auto* encrypting_io = EncryptingFileIO::From(io)) {
+    return encrypting_io->io();
+  }
+  return io;
+}
+
 }  // namespace
 
 Result<std::string> ArrowFileSystemFileIO::ResolvePath(const std::string& file_location) {
@@ -507,9 +515,12 @@ Result<std::string> ArrowFileSystemFileIO::ResolvePath(const std::string& file_l
 }
 
 Result<std::shared_ptr<::arrow::io::RandomAccessFile>> OpenArrowInputStream(
-    const std::shared_ptr<FileIO>& io, const std::string& path,
+    const std::shared_ptr<FileIO>& file_io, const std::string& path,
     std::optional<size_t> length) {
-  ICEBERG_PRECHECK(io != nullptr, "FileIO cannot be null");
+  ICEBERG_PRECHECK(file_io != nullptr, "FileIO cannot be null");
+  // An EncryptingFileIO passes plain reads through: use its FileIO directly, so that
+  // Arrow file systems keep their fast path.
+  const auto& io = PlainFileIO(file_io);
 
   if (auto arrow_io = std::dynamic_pointer_cast<ArrowFileSystemFileIO>(io)) {
     ICEBERG_ASSIGN_OR_RAISE(auto resolved_path, arrow_io->ResolvePath(path));
@@ -539,8 +550,9 @@ Result<std::shared_ptr<::arrow::io::RandomAccessFile>> OpenArrowInputStream(
 }
 
 Result<std::shared_ptr<::arrow::io::OutputStream>> OpenArrowOutputStream(
-    const std::shared_ptr<FileIO>& io, const std::string& path, bool overwrite) {
-  ICEBERG_PRECHECK(io != nullptr, "FileIO cannot be null");
+    const std::shared_ptr<FileIO>& file_io, const std::string& path, bool overwrite) {
+  ICEBERG_PRECHECK(file_io != nullptr, "FileIO cannot be null");
+  const auto& io = PlainFileIO(file_io);
 
   if (auto arrow_io = std::dynamic_pointer_cast<ArrowFileSystemFileIO>(io)) {
     ICEBERG_ASSIGN_OR_RAISE(auto resolved_path, arrow_io->ResolvePath(path));
