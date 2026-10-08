@@ -27,6 +27,7 @@
 #include "iceberg/arrow/arrow_io_util.h"
 #include "iceberg/encryption/aes_gcm_internal.h"
 #include "iceberg/encryption/aes_gcm_stream.h"
+#include "iceberg/encryption/in_memory_kms.h"
 #include "iceberg/encryption/standard_key_metadata.h"
 #include "iceberg/test/encryption_test_util.h"
 #include "iceberg/test/matchers.h"
@@ -219,6 +220,32 @@ TEST_F(AesGcmStreamTest, DetectsTampering) {
   EXPECT_THAT(Open(path, key, aad, 36)->Open(), IsError(ErrorKind::kInvalid));
   // Shorter than an empty stream
   EXPECT_THAT(Open(path, key, aad, 35)->Open(), IsError(ErrorKind::kInvalid));
+}
+
+TEST(InMemoryKmsTest, UnwrapsJavaWrappedKey) {
+  // The key encryption key of the Java fixture table, wrapped by Java's UnitestKMS
+  InMemoryKms kms({{"keyA", ReadEncryptionVector("master_key_keyA.bin")}});
+  ICEBERG_UNWRAP_OR_FAIL(
+      auto kek, kms.UnwrapKey(ReadEncryptionVector("kek_wrapped_by_keyA.bin"), "keyA"));
+  EXPECT_EQ(kek.size(), 16);
+
+  ICEBERG_UNWRAP_OR_FAIL(auto wrapped, kms.WrapKey(kek, "keyA"));
+  ICEBERG_UNWRAP_OR_FAIL(auto unwrapped, kms.UnwrapKey(wrapped, "keyA"));
+  EXPECT_EQ(unwrapped, kek);
+  EXPECT_THAT(kms.UnwrapKey(wrapped, "keyB"), IsError(ErrorKind::kNotFound));
+}
+
+TEST(InMemoryKmsTest, RegistryAndProperties) {
+  InMemoryKms::Register();
+  ICEBERG_UNWRAP_OR_FAIL(
+      auto kms, KmsRegistry::FromCatalogProperties(
+                    {{"encryption.kms-impl", "in-memory"},
+                     // Base64 of "0123456789012345", UnitestKMS's keyA
+                     {"encryption.in-memory-kms.key.keyA", "MDEyMzQ1Njc4OTAxMjM0NQ=="}}));
+  ASSERT_NE(kms, nullptr);
+  ICEBERG_UNWRAP_OR_FAIL(
+      auto kek, kms->UnwrapKey(ReadEncryptionVector("kek_wrapped_by_keyA.bin"), "keyA"));
+  EXPECT_EQ(kek.size(), 16);
 }
 
 }  // namespace iceberg
