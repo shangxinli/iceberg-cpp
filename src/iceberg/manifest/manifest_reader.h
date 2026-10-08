@@ -179,6 +179,16 @@ class ICEBERG_EXPORT ManifestListReader {
   /// \return A Result containing the reader or an error.
   static Result<std::unique_ptr<ManifestListReader>> Make(
       std::string_view manifest_list_location, std::shared_ptr<FileIO> file_io);
+
+  /// \brief Creates a reader for the manifest list of a snapshot.
+  ///
+  /// If the snapshot has an encryption `key-id`, `file_io` must be the table's
+  /// EncryptingFileIO, which decrypts the manifest list.
+  /// \param snapshot The snapshot.
+  /// \param file_io File IO implementation to use.
+  /// \return A Result containing the reader or an error.
+  static Result<std::unique_ptr<ManifestListReader>> Make(
+      const Snapshot& snapshot, std::shared_ptr<FileIO> file_io);
 };
 
 }  // namespace iceberg

@@ -30,6 +30,7 @@
 #include <nanoarrow/nanoarrow.h>
 
 #include "iceberg/arrow_c_data_guard_internal.h"
+#include "iceberg/encryption/encrypting_file_io.h"
 #include "iceberg/expression/expression.h"
 #include "iceberg/expression/projections.h"
 #include "iceberg/file_format.h"
@@ -42,6 +43,7 @@
 #include "iceberg/partition_spec.h"
 #include "iceberg/schema.h"
 #include "iceberg/schema_field.h"
+#include "iceberg/snapshot.h"
 #include "iceberg/type.h"
 #include "iceberg/util/checked_cast.h"
 #include "iceberg/util/content_file_util.h"
@@ -1104,6 +1106,14 @@ Result<std::unique_ptr<ManifestReader>> ManifestReader::Make(
       std::string(manifest_location), manifest_length, std::move(file_io),
       std::move(schema), std::move(spec), std::move(inheritable_metadata), first_row_id,
       is_committed);
+}
+
+Result<std::unique_ptr<ManifestListReader>> ManifestListReader::Make(
+    const Snapshot& snapshot, std::shared_ptr<FileIO> file_io) {
+  ICEBERG_PRECHECK(file_io != nullptr, "FileIO cannot be null to read manifest list");
+  ICEBERG_ASSIGN_OR_RAISE(auto manifest_list_io,
+                          EncryptingFileIO::ForManifestList(file_io, snapshot.key_id));
+  return Make(snapshot.manifest_list, std::move(manifest_list_io));
 }
 
 Result<std::unique_ptr<ManifestListReader>> ManifestListReader::Make(

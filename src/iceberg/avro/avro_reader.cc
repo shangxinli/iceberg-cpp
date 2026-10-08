@@ -498,7 +498,12 @@ Result<std::unordered_map<std::string, std::string>> AvroReader::Metadata() {
 
 Status AvroReader::Open(const ReaderOptions& options) {
   impl_ = std::make_unique<Impl>();
-  return impl_->Open(options);
+  try {
+    return impl_->Open(options);
+  } catch (const ::avro::Exception& e) {
+    // e.g. an encrypted (AES GCM Stream) file opened without its key
+    return Invalid("Failed to open Avro file {}: {}", options.path, e.what());
+  }
 }
 
 Status AvroReader::Close() { return impl_->Close(); }

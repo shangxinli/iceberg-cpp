@@ -210,8 +210,7 @@ Result<SnapshotReader::ManifestsCache> SnapshotReader::InitManifestsCache(
   }
 
   // Read manifest list
-  ICEBERG_ASSIGN_OR_RAISE(auto reader,
-                          ManifestListReader::Make(snapshot->manifest_list, file_io));
+  ICEBERG_ASSIGN_OR_RAISE(auto reader, ManifestListReader::Make(*snapshot, file_io));
   ICEBERG_ASSIGN_OR_RAISE(auto manifest_files, reader->Files());
 
   std::vector<ManifestFile> manifests;

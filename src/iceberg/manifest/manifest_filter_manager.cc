@@ -579,8 +579,8 @@ Result<std::vector<ManifestFile>> ManifestFilterManager::FilterManifests(
 
   ICEBERG_PRECHECK(file_io_ != nullptr, "Cannot filter manifests: FileIO is null");
 
-  ICEBERG_ASSIGN_OR_RAISE(
-      auto list_reader, ManifestListReader::Make(base_snapshot->manifest_list, file_io_));
+  ICEBERG_ASSIGN_OR_RAISE(auto list_reader,
+                          ManifestListReader::Make(*base_snapshot, file_io_));
   ICEBERG_ASSIGN_OR_RAISE(auto all_manifests, list_reader->Files());
 
   std::vector<const ManifestFile*> manifests;
