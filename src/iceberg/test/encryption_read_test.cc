@@ -20,13 +20,18 @@
 /// Reading tables encrypted by Java.
 
 #include <filesystem>
+#include <map>
+#include <tuple>
 
 #include <gtest/gtest.h>
 
 #include "iceberg/avro/avro_register.h"
+#include "iceberg/manifest/manifest_entry.h"
 #include "iceberg/manifest/manifest_list.h"
 #include "iceberg/manifest/manifest_reader.h"
 #include "iceberg/snapshot.h"
+#include "iceberg/table.h"
+#include "iceberg/table_scan.h"
 #include "iceberg/test/encryption_fixture.h"
 #include "iceberg/test/matchers.h"
 
@@ -76,6 +81,62 @@ TEST_F(EncryptionReadTest, ManifestListNeedsEncryption) {
   // Reading the AGS1 bytes as Avro fails cleanly
   EXPECT_THAT(ManifestListReader::Make(snapshot.manifest_list, fixture.plain_io),
               IsError(ErrorKind::kInvalid));
+}
+
+TEST_F(EncryptionReadTest, ReadsManifests) {
+  ICEBERG_UNWRAP_OR_FAIL(auto fixture, JavaEncryptedTableFixture::Load(5));
+  ICEBERG_UNWRAP_OR_FAIL(auto schema, fixture.metadata->Schema());
+  SnapshotReader snapshot_reader(fixture.metadata->snapshots.back().get());
+  ICEBERG_UNWRAP_OR_FAIL(auto manifests, snapshot_reader.Manifests(fixture.io));
+
+  std::map<std::string, std::shared_ptr<DataFile>> files;
+  for (const auto& manifest : manifests) {
+    ICEBERG_UNWRAP_OR_FAIL(
+        auto spec, fixture.metadata->PartitionSpecById(manifest.partition_spec_id));
+    ICEBERG_UNWRAP_OR_FAIL(auto reader,
+                           ManifestReader::Make(manifest, fixture.io, schema, spec));
+    ICEBERG_UNWRAP_OR_FAIL(auto entries, reader->Entries());
+    for (const auto& entry : entries) {
+      files[std::filesystem::path(entry.data_file->file_path).filename().string()] =
+          entry.data_file;
+    }
+  }
+  ASSERT_EQ(files.size(), 4);
+
+  // Every content file carries its own key metadata
+  for (const auto& [name, file] : files) {
+    ASSERT_FALSE(file->key_metadata.empty()) << name;
+    ICEBERG_UNWRAP_OR_FAIL(auto key_metadata,
+                           StandardKeyMetadata::Parse(file->key_metadata));
+    EXPECT_EQ(key_metadata.encryption_key.size(), 16);
+    EXPECT_EQ(key_metadata.aad_prefix->size(), 16);
+    auto stored = static_cast<int64_t>(
+        std::filesystem::file_size(GetResourcePath("encryption/table/data/" + name)));
+    EXPECT_EQ(file->file_size_in_bytes, stored) << name;
+    // Java records the stored length for every format. Parquet does not need it (it is
+    // encrypted natively), AES GCM streams (Avro data, Puffin deletion vectors) do.
+    EXPECT_EQ(key_metadata.file_length, stored) << name;
+  }
+  EXPECT_EQ(files.at("data-2.avro")->file_format, FileFormatType::kAvro);
+}
+
+TEST_F(EncryptionReadTest, PlansScans) {
+  for (auto [version, data_files, delete_files] :
+       {std::tuple{2, 1, 0}, std::tuple{4, 3, 0}, std::tuple{5, 3, 1}}) {
+    ICEBERG_UNWRAP_OR_FAIL(auto fixture, JavaEncryptedTableFixture::Load(version));
+    ICEBERG_UNWRAP_OR_FAIL(
+        auto table, StaticTable::Make(TableIdentifier{.name = "t"}, fixture.metadata,
+                                      fixture.metadata_location, fixture.io));
+    ICEBERG_UNWRAP_OR_FAIL(auto builder, table->NewScan());
+    ICEBERG_UNWRAP_OR_FAIL(auto scan, builder->Build());
+    ICEBERG_UNWRAP_OR_FAIL(auto tasks, scan->PlanFiles());
+    ASSERT_EQ(tasks.size(), data_files) << "v" << version;
+    size_t deletes = 0;
+    for (const auto& task : tasks) {
+      deletes += task->delete_files().size();
+    }
+    EXPECT_EQ(deletes, delete_files) << "v" << version;
+  }
 }
 
 }  // namespace iceberg

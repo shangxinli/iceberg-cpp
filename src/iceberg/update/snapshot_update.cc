@@ -25,6 +25,7 @@
 #include <span>
 
 #include "iceberg/constants.h"
+#include "iceberg/encryption/encrypting_file_io.h"
 #include "iceberg/file_io.h"
 #include "iceberg/inheritable_metadata.h"
 #include "iceberg/logging/log_macros.h"
@@ -124,11 +125,13 @@ Result<ManifestFile> AddMetadata(const ManifestFile& manifest, std::shared_ptr<F
   ICEBERG_ASSIGN_OR_RAISE(auto partition_type, spec->PartitionType(*schema));
 
   ICEBERG_ASSIGN_OR_RAISE(auto inheritable_metadata, InheritableMetadataFactory::Empty());
+  ICEBERG_ASSIGN_OR_RAISE(auto manifest_io,
+                          EncryptingFileIO::ForFile(io, manifest.key_metadata));
   ICEBERG_ASSIGN_OR_RAISE(
       auto reader,
       ManifestReader::Make(manifest.manifest_path, manifest.manifest_length,
-                           std::move(io), schema, spec, std::move(inheritable_metadata),
-                           manifest.first_row_id));
+                           std::move(manifest_io), schema, spec,
+                           std::move(inheritable_metadata), manifest.first_row_id));
   ICEBERG_ASSIGN_OR_RAISE(auto entries, reader->Entries());
 
   PartitionSummary stats(*partition_type);

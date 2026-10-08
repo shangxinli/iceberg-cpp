@@ -1067,8 +1067,11 @@ Result<std::unique_ptr<ManifestReader>> ManifestReader::Make(
   // Create inheritable metadata for this manifest
   ICEBERG_ASSIGN_OR_RAISE(auto inheritable_metadata,
                           InheritableMetadataFactory::FromManifest(manifest));
+  // Manifests of encrypted tables are AES GCM streams.
+  ICEBERG_ASSIGN_OR_RAISE(auto manifest_io,
+                          EncryptingFileIO::ForFile(file_io, manifest.key_metadata));
   return std::make_unique<ManifestReaderImpl>(
-      manifest.manifest_path, manifest.manifest_length, std::move(file_io),
+      manifest.manifest_path, manifest.manifest_length, std::move(manifest_io),
       std::move(schema), std::move(spec), std::move(inheritable_metadata),
       manifest.first_row_id, is_committed);
 }
