@@ -114,11 +114,4 @@ Status EncryptionUtil::CheckWriteSupported(const TableMetadata& metadata) {
   return {};
 }
 
-Status EncryptionUtil::CheckWriteSupported(const std::shared_ptr<FileIO>& io) {
-  if (EncryptingFileIO::From(io) != nullptr) {
-    return NotSupported("Writing to encrypted tables is not supported yet");
-  }
-  return {};
-}
-
 }  // namespace iceberg

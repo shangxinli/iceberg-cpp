@@ -31,6 +31,7 @@
 #include "iceberg/deletes/dv_util_internal.h"
 #include "iceberg/deletes/dv_writer.h"
 #include "iceberg/deletes/position_delete_index.h"
+#include "iceberg/encryption/encrypting_file_io.h"
 #include "iceberg/file_io.h"
 #include "iceberg/manifest/manifest_entry.h"
 #include "iceberg/metadata_columns.h"
@@ -93,7 +94,10 @@ Result<PositionDeleteIndex> DVUtil::ReadDV(const std::shared_ptr<DataFile>& dele
   ICEBERG_PRECHECK(length <= std::numeric_limits<int32_t>::max(),
                    "Cannot read deletion vector larger than 2GB: {}", length);
 
-  ICEBERG_ASSIGN_OR_RAISE(auto input_file, io->NewInputFile(delete_file->file_path));
+  // Deletion vectors of encrypted tables are AES GCM streams.
+  ICEBERG_ASSIGN_OR_RAISE(auto dv_io,
+                          EncryptingFileIO::ForFile(io, delete_file->key_metadata));
+  ICEBERG_ASSIGN_OR_RAISE(auto input_file, dv_io->NewInputFile(delete_file->file_path));
   ICEBERG_ASSIGN_OR_RAISE(auto stream, input_file->Open());
 
   std::vector<std::byte> bytes(static_cast<size_t>(length));

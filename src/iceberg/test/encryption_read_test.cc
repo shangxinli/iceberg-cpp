@@ -224,4 +224,13 @@ TEST_F(EncryptionReadTest, WrongKeyFailsCleanly) {
               IsError(ErrorKind::kInvalid));
 }
 
+TEST_F(EncryptionReadTest, ReadsDeletionVectors) {
+  // v5: a Puffin deletion vector (an AES GCM stream) deletes id 1. Java's own generic
+  // reader cannot read encrypted DVs yet (apache/iceberg#16157).
+  ICEBERG_UNWRAP_OR_FAIL(auto v5, LoadTable(5));
+  ICEBERG_UNWRAP_OR_FAIL(auto ids, ScanIds(*v5));
+  EXPECT_EQ(ids,
+            (std::vector<int64_t>{0, 2, 3, 4, 100, 101, 102, 103, 104, 200, 201, 202}));
+}
+
 }  // namespace iceberg

@@ -31,6 +31,8 @@
 #include "iceberg/catalog/memory/in_memory_catalog.h"
 #include "iceberg/data/data_writer.h"
 #include "iceberg/data/position_delete_writer.h"
+#include "iceberg/deletes/dv_util_internal.h"
+#include "iceberg/deletes/dv_writer.h"
 #include "iceberg/encryption/encryption_register.h"
 #include "iceberg/encryption/encryption_util.h"
 #include "iceberg/file_reader.h"
@@ -355,6 +357,39 @@ TEST_F(EncryptionWriteTest, WritesEncryptedPositionDeletes) {
                          StandardKeyMetadata::Parse(delete_file.key_metadata));
   EXPECT_EQ(key_metadata.file_length,
             static_cast<int64_t>(std::filesystem::file_size(path)));
+}
+
+TEST_F(EncryptionWriteTest, WritesEncryptedDeletionVectors) {
+  ICEBERG_UNWRAP_OR_FAIL(auto fixture, JavaEncryptedTableFixture::Load(2));
+  auto path = CreateNewTempFilePath();
+  ICEBERG_UNWRAP_OR_FAIL(
+      auto writer, DVWriter::Make({.path = path,
+                                   .io = fixture.io,
+                                   .load_previous_deletes = [](std::string_view)
+                                       -> Result<std::optional<PositionDeleteIndex>> {
+                                     return std::nullopt;
+                                   }}));
+  auto spec = PartitionSpec::Unpartitioned();
+  ASSERT_THAT(writer->Delete("/data/a.parquet", 3, spec, PartitionValues{}), IsOk());
+  ASSERT_THAT(writer->Delete("/data/a.parquet", 5, spec, PartitionValues{}), IsOk());
+  ASSERT_THAT(writer->Close(), IsOk());
+  ICEBERG_UNWRAP_OR_FAIL(auto result, writer->Metadata());
+  ASSERT_EQ(result.data_files.size(), 1);
+  auto dv = result.data_files.front();
+
+  EXPECT_EQ(ReadMagic(path), "AGS1");
+  auto stored = static_cast<int64_t>(std::filesystem::file_size(path));
+  EXPECT_EQ(dv->file_size_in_bytes, stored);
+  ICEBERG_UNWRAP_OR_FAIL(auto key_metadata, StandardKeyMetadata::Parse(dv->key_metadata));
+  EXPECT_EQ(key_metadata.file_length, stored);
+
+  ICEBERG_UNWRAP_OR_FAIL(auto deletes, DVUtil::ReadDV(dv, fixture.io));
+  EXPECT_EQ(deletes.Cardinality(), 2);
+  EXPECT_TRUE(deletes.IsDeleted(3));
+  EXPECT_TRUE(deletes.IsDeleted(5));
+  EXPECT_FALSE(deletes.IsDeleted(4));
+  // Not readable without the encryption manager
+  EXPECT_THAT(DVUtil::ReadDV(dv, fixture.plain_io), IsError(ErrorKind::kNotSupported));
 }
 
 }  // namespace iceberg

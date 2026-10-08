@@ -87,10 +87,6 @@ struct ICEBERG_EXPORT EncryptionUtil {
   ///
   /// TODO: remove once encrypted manifests, manifest lists and data files are written.
   static Status CheckWriteSupported(const TableMetadata& metadata);
-
-  /// \brief Fails if `io` is the FileIO of an encrypted table and writing encrypted
-  /// files is not supported yet.
-  static Status CheckWriteSupported(const std::shared_ptr<FileIO>& io);
 };
 
 }  // namespace iceberg

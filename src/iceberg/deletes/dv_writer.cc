@@ -32,6 +32,7 @@
 #include "iceberg/deletes/dv_util_internal.h"
 #include "iceberg/deletes/position_delete_index.h"
 #include "iceberg/deletes/roaring_position_bitmap.h"
+#include "iceberg/encryption/encrypting_file_io.h"
 #include "iceberg/encryption/encryption_util.h"
 #include "iceberg/file_format.h"
 #include "iceberg/file_io.h"  // IWYU pragma: keep
@@ -113,7 +114,14 @@ class DVWriter::Impl {
       ICEBERG_RETURN_UNEXPECTED(LoadPreviousDeletes(path, deletes));
     }
 
-    ICEBERG_ASSIGN_OR_RAISE(auto output_file, options_.io->NewOutputFile(options_.path));
+    // Deletion vectors of encrypted tables are AES GCM streams.
+    auto io = options_.io;
+    if (auto* encrypting_io = EncryptingFileIO::From(io)) {
+      ICEBERG_ASSIGN_OR_RAISE(key_metadata_,
+                              encrypting_io->encryption()->NewKeyMetadata());
+      ICEBERG_ASSIGN_OR_RAISE(io, encrypting_io->ForEncryptedWrite(*key_metadata_));
+    }
+    ICEBERG_ASSIGN_OR_RAISE(auto output_file, io->NewOutputFile(options_.path));
     const std::string output_path(options_.path);
     ICEBERG_ASSIGN_OR_RAISE(
         auto writer, puffin::PuffinWriter::Make(
@@ -177,14 +185,13 @@ class DVWriter::Impl {
     ICEBERG_CHECK(blob_metadata != blobs_by_path_.end(),
                   "Missing deletion vector blob for {}", referenced_data_file);
 
-    return std::make_shared<DataFile>(DataFile{
+    auto dv = std::make_shared<DataFile>(DataFile{
         .content = DataFile::Content::kPositionDeletes,
         .file_path = path,
         .file_format = FileFormatType::kPuffin,
         .partition = deletes->second.partition,
         .record_count = deletes->second.positions.Cardinality(),
         .file_size_in_bytes = size,
-        // TODO(gangwu): support encryption key metadata
         .referenced_data_file = std::string(referenced_data_file),
         .content_offset = blob_metadata->second.offset,
         .content_size_in_bytes = blob_metadata->second.length,
@@ -192,12 +199,16 @@ class DVWriter::Impl {
                                  ? std::make_optional(deletes->second.spec->spec_id())
                                  : std::nullopt,
     });
+    dv->key_metadata = EncryptionUtil::FileKeyMetadata(key_metadata_, size);
+    return dv;
   }
 
   DVWriterOptions options_;
   std::map<std::string, Deletes, StringLess> deletes_by_path_;
   std::map<std::string, puffin::BlobMetadata, StringLess> blobs_by_path_;
   DeleteWriteResult result_;
+  // Set when the Puffin file is encrypted.
+  std::optional<StandardKeyMetadata> key_metadata_;
   bool closed_ = false;
 };
 
@@ -208,7 +219,6 @@ DVWriter::~DVWriter() = default;
 Result<std::unique_ptr<DVWriter>> DVWriter::Make(DVWriterOptions options) {
   ICEBERG_PRECHECK(!options.path.empty(), "DVWriter requires an output path");
   ICEBERG_PRECHECK(options.io != nullptr, "DVWriter requires a FileIO");
-  ICEBERG_RETURN_UNEXPECTED(EncryptionUtil::CheckWriteSupported(options.io));
   ICEBERG_PRECHECK(options.load_previous_deletes != nullptr,
                    "DVWriter requires a load_previous_deletes callback");
   return std::unique_ptr<DVWriter>(
