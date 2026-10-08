@@ -19,6 +19,7 @@
 
 /// Writing encrypted tables.
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 
@@ -52,6 +53,7 @@
 #include "iceberg/test/matchers.h"
 #include "iceberg/test/temp_file_test_base.h"
 #include "iceberg/update/fast_append.h"
+#include "iceberg/update/row_delta.h"
 #include "iceberg/update/update_properties.h"
 
 namespace iceberg {
@@ -68,26 +70,6 @@ class EncryptionWriteTest : public TempFileTestBase {
                                SchemaField::MakeOptional(2, "data", string())},
       /*schema_id=*/0);
 };
-
-TEST_F(EncryptionWriteTest, CommitsAreBlockedUntilSupported) {
-  // Snapshot updates refuse encrypted tables
-  auto warehouse = CreateNewTempFilePath();
-  std::filesystem::create_directories(warehouse + "/t/metadata");
-  std::shared_ptr<FileIO> io(arrow::MakeLocalFileIO());
-  ICEBERG_UNWRAP_OR_FAIL(auto catalog, InMemoryCatalog::Make("c", io, warehouse, {}));
-  TableIdentifier ident{.name = "t"};
-  ICEBERG_UNWRAP_OR_FAIL(
-      auto table, catalog->CreateTable(ident, schema_, PartitionSpec::Unpartitioned(),
-                                       SortOrder::Unsorted(), warehouse + "/t", {}));
-  ICEBERG_UNWRAP_OR_FAIL(auto props, table->NewUpdateProperties());
-  props->Set("format-version", "3");
-  props->Set("encryption.key-id", "keyA");
-  ASSERT_THAT(props->Commit(), IsOk());
-  ICEBERG_UNWRAP_OR_FAIL(table, catalog->LoadTable(ident));
-
-  ICEBERG_UNWRAP_OR_FAIL(auto append, table->NewFastAppend());
-  EXPECT_THAT(append->Commit(), IsError(ErrorKind::kNotSupported));
-}
 
 TEST_F(EncryptionWriteTest, EncryptionPropertiesRequireV3) {
   auto spec = PartitionSpec::Unpartitioned();
@@ -390,6 +372,157 @@ TEST_F(EncryptionWriteTest, WritesEncryptedDeletionVectors) {
   EXPECT_FALSE(deletes.IsDeleted(4));
   // Not readable without the encryption manager
   EXPECT_THAT(DVUtil::ReadDV(dv, fixture.plain_io), IsError(ErrorKind::kNotSupported));
+}
+
+namespace {
+
+/// Catalog properties configuring the in-memory KMS with Java's UnitestKMS keyA.
+const std::unordered_map<std::string, std::string> kKmsProperties = {
+    {"encryption.kms-impl", "in-memory"},
+    {"encryption.in-memory-kms.key.keyA", "MDEyMzQ1Njc4OTAxMjM0NQ=="}};
+
+}  // namespace
+
+class EncryptedCommitTest : public EncryptionWriteTest {
+ protected:
+  void SetUp() override {
+    EncryptionWriteTest::SetUp();
+    encryption::RegisterAll();
+    InMemoryKms::Register();
+    // Keep the table for verification by Java when asked (see
+    // EncryptedTableFixtureGenerator.verifyForeignTable)
+    const char* output_dir = std::getenv("ICEBERG_ENCRYPTION_OUTPUT_DIR");
+    warehouse_ =
+        output_dir != nullptr ? std::string(output_dir) : CreateNewTempFilePath();
+    std::filesystem::remove_all(warehouse_ + "/cpp_table");
+    std::filesystem::create_directories(warehouse_ + "/cpp_table/metadata");
+    std::filesystem::create_directories(warehouse_ + "/cpp_table/data");
+    io_ = std::shared_ptr<FileIO>(arrow::MakeLocalFileIO());
+  }
+
+  Result<std::shared_ptr<DataFile>> WriteData(const Table& table, FileFormatType format,
+                                              const std::string& name,
+                                              std::string_view json) {
+    ArrowSchema c_schema;
+    ICEBERG_RETURN_UNEXPECTED(ToArrowSchema(*schema_, &c_schema));
+    auto arrow_type =
+        ::arrow::struct_(::arrow::ImportType(&c_schema).ValueOrDie()->fields());
+    ICEBERG_ASSIGN_OR_RAISE(
+        auto writer, DataWriter::Make({.path = warehouse_ + "/cpp_table/data/" + name,
+                                       .schema = schema_,
+                                       .spec = PartitionSpec::Unpartitioned(),
+                                       .partition = PartitionValues{},
+                                       .format = format,
+                                       .io = table.io()}));
+    auto array =
+        ::arrow::json::ArrayFromJSONString(arrow_type, std::string(json)).ValueOrDie();
+    ArrowArray c_array;
+    if (!::arrow::ExportArray(*array, &c_array).ok()) {
+      return IOError("export failed");
+    }
+    ICEBERG_RETURN_UNEXPECTED(writer->Write(&c_array));
+    ICEBERG_RETURN_UNEXPECTED(writer->Close());
+    ICEBERG_ASSIGN_OR_RAISE(auto result, writer->Metadata());
+    return result.data_files.front();
+  }
+
+  std::string warehouse_;
+  std::shared_ptr<FileIO> io_;
+};
+
+TEST_F(EncryptedCommitTest, CommitsAndReadsEncryptedTable) {
+  ICEBERG_UNWRAP_OR_FAIL(auto catalog,
+                         InMemoryCatalog::Make("c", io_, warehouse_, kKmsProperties));
+  TableIdentifier ident{.name = "cpp_table"};
+  ICEBERG_UNWRAP_OR_FAIL(
+      auto table,
+      catalog->CreateTable(ident, schema_, PartitionSpec::Unpartitioned(),
+                           SortOrder::Unsorted(), warehouse_ + "/cpp_table", {}));
+  {
+    ICEBERG_UNWRAP_OR_FAIL(auto props, table->NewUpdateProperties());
+    props->Set("format-version", "3");
+    props->Set("encryption.key-id", "keyA");
+    ASSERT_THAT(props->Commit(), IsOk());
+    ICEBERG_UNWRAP_OR_FAIL(table, catalog->LoadTable(ident));
+  }
+  ASSERT_NE(EncryptingFileIO::From(table->io()), nullptr);
+
+  // Snapshot 1: Parquet data
+  ICEBERG_UNWRAP_OR_FAIL(auto parquet_file,
+                         WriteData(*table, FileFormatType::kParquet, "cpp-0.parquet",
+                                   R"([[0, "c0"], [1, "c1"], [2, "c2"]])"));
+  {
+    ICEBERG_UNWRAP_OR_FAIL(auto append, table->NewFastAppend());
+    append->AppendFile(parquet_file);
+    ASSERT_THAT(append->Commit(), IsOk());
+  }
+  // Snapshot 2: Avro data
+  ICEBERG_UNWRAP_OR_FAIL(table, catalog->LoadTable(ident));
+  ICEBERG_UNWRAP_OR_FAIL(auto avro_file,
+                         WriteData(*table, FileFormatType::kAvro, "cpp-1.avro",
+                                   R"([[100, "c100"], [101, "c101"], [102, "c102"]])"));
+  {
+    ICEBERG_UNWRAP_OR_FAIL(auto append, table->NewFastAppend());
+    append->AppendFile(avro_file);
+    ASSERT_THAT(append->Commit(), IsOk());
+  }
+  // Snapshot 3: a deletion vector deleting id 1
+  ICEBERG_UNWRAP_OR_FAIL(table, catalog->LoadTable(ident));
+  ICEBERG_UNWRAP_OR_FAIL(
+      auto dv_writer,
+      DVWriter::Make(
+          {.path = warehouse_ + "/cpp_table/data/cpp-dv.puffin",
+           .io = table->io(),
+           .load_previous_deletes = [](std::string_view)
+               -> Result<std::optional<PositionDeleteIndex>> { return std::nullopt; }}));
+  ASSERT_THAT(dv_writer->Delete(parquet_file->file_path, 1,
+                                PartitionSpec::Unpartitioned(), PartitionValues{}),
+              IsOk());
+  ASSERT_THAT(dv_writer->Close(), IsOk());
+  ICEBERG_UNWRAP_OR_FAIL(auto dv_result, dv_writer->Metadata());
+  {
+    ICEBERG_UNWRAP_OR_FAIL(auto row_delta, table->NewRowDelta());
+    row_delta->AddDeletes(dv_result.data_files.front());
+    ASSERT_THAT(row_delta->Commit(), IsOk());
+  }
+
+  ICEBERG_UNWRAP_OR_FAIL(table, catalog->LoadTable(ident));
+  const auto& metadata = *table->metadata();
+  ASSERT_EQ(metadata.snapshots.size(), 3);
+  // One key encryption key and one manifest list key per snapshot
+  EXPECT_EQ(metadata.encryption_keys.size(), 4);
+  for (const auto& snapshot : metadata.snapshots) {
+    EXPECT_TRUE(snapshot->key_id.has_value());
+    EXPECT_EQ(ReadMagic(snapshot->manifest_list), "AGS1");
+  }
+  EXPECT_EQ(ReadMagic(parquet_file->file_path), "PARE");
+  EXPECT_EQ(ReadMagic(avro_file->file_path), "AGS1");
+
+  ICEBERG_UNWRAP_OR_FAIL(auto ids, ScanTableIds(*table));
+  EXPECT_EQ(ids, (std::vector<int64_t>{0, 2, 100, 101, 102}));
+
+  // Another catalog with the same KMS configuration reads it from the committed keys
+  ICEBERG_UNWRAP_OR_FAIL(auto reader_catalog,
+                         InMemoryCatalog::Make("r", io_, warehouse_, kKmsProperties));
+  ICEBERG_UNWRAP_OR_FAIL(
+      auto reader_table,
+      reader_catalog->RegisterTable(ident, std::string(table->metadata_file_location())));
+  ICEBERG_UNWRAP_OR_FAIL(auto reader_ids, ScanTableIds(*reader_table));
+  EXPECT_EQ(reader_ids, ids);
+
+  // A catalog without a KMS can neither read nor write it
+  ICEBERG_UNWRAP_OR_FAIL(auto plain_catalog,
+                         InMemoryCatalog::Make("p", io_, warehouse_, {}));
+  ICEBERG_UNWRAP_OR_FAIL(
+      auto plain_table,
+      plain_catalog->RegisterTable(ident, std::string(table->metadata_file_location())));
+  EXPECT_THAT(ScanTableIds(*plain_table), IsError(ErrorKind::kNotSupported));
+  ICEBERG_UNWRAP_OR_FAIL(auto plain_append, plain_table->NewFastAppend());
+  plain_append->AppendFile(parquet_file);
+  EXPECT_THAT(plain_append->Commit(), IsError(ErrorKind::kNotSupported));
+
+  std::ofstream(warehouse_ + "/cpp_table_metadata_location.txt")
+      << table->metadata_file_location();
 }
 
 }  // namespace iceberg

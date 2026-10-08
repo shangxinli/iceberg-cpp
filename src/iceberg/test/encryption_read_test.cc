@@ -51,31 +51,8 @@ class EncryptionReadTest : public ::testing::Test {
     parquet::RegisterAll();
   }
 
-  /// Scan the table and return the sorted ids.
   static Result<std::vector<int64_t>> ScanIds(const Table& table) {
-    ICEBERG_ASSIGN_OR_RAISE(auto builder, table.NewScan());
-    ICEBERG_ASSIGN_OR_RAISE(auto scan, builder->Build());
-    ICEBERG_ASSIGN_OR_RAISE(auto tasks, scan->PlanFiles());
-    ICEBERG_ASSIGN_OR_RAISE(auto schema, table.schema());
-    ICEBERG_ASSIGN_OR_RAISE(auto reader,
-                            FileScanTaskReader::Make({.io = table.io(),
-                                                      .table_schema = schema,
-                                                      .schemas = {schema},
-                                                      .projected_schema = schema}));
-    std::vector<int64_t> ids;
-    for (const auto& task : tasks) {
-      ICEBERG_ASSIGN_OR_RAISE(auto stream, reader->Open(*task));
-      auto batches = ::arrow::ImportRecordBatchReader(&stream).ValueOrDie();
-      auto arrow_table = batches->ToTable().ValueOrDie();
-      auto id_column = arrow_table->GetColumnByName("id");
-      for (int64_t i = 0; i < arrow_table->num_rows(); ++i) {
-        ids.push_back(std::static_pointer_cast<::arrow::Int64Scalar>(
-                          id_column->GetScalar(i).ValueOrDie())
-                          ->value);
-      }
-    }
-    std::ranges::sort(ids);
-    return ids;
+    return ScanTableIds(table);
   }
 
   static Result<std::shared_ptr<Table>> LoadTable(int version) {

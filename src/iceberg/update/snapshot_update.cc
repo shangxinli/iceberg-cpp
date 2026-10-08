@@ -315,7 +315,7 @@ int64_t SnapshotUpdate::SnapshotId() {
 Result<SnapshotUpdate::ApplyResult> SnapshotUpdate::Apply() {
   commit_metrics_->attempts->Increment();
   ICEBERG_RETURN_UNEXPECTED(CheckErrors());
-  ICEBERG_RETURN_UNEXPECTED(EncryptionUtil::CheckWriteSupported(base()));
+  ICEBERG_RETURN_UNEXPECTED(EncryptionUtil::CheckCanWrite(base(), ctx_->table->io()));
 
   ICEBERG_ASSIGN_OR_RAISE(auto parent_snapshot,
                           SnapshotUtil::OptionalLatestSnapshot(base(), target_branch_));

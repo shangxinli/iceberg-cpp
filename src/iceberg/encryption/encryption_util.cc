@@ -107,9 +107,12 @@ Result<std::shared_ptr<FileIO>> EncryptionUtil::MakeTableFileIO(
   return std::make_shared<EncryptingFileIO>(std::move(io), std::move(manager));
 }
 
-Status EncryptionUtil::CheckWriteSupported(const TableMetadata& metadata) {
-  if (IsEncrypted(metadata)) {
-    return NotSupported("Writing to encrypted tables is not supported yet");
+Status EncryptionUtil::CheckCanWrite(const TableMetadata& metadata,
+                                     const std::shared_ptr<FileIO>& io) {
+  if (IsEncrypted(metadata) && EncryptingFileIO::From(io) == nullptr) {
+    return NotSupported(
+        "Cannot write to encrypted table: no KMS client is configured; set the "
+        "encryption.kms-type or encryption.kms-impl catalog property");
   }
   return {};
 }

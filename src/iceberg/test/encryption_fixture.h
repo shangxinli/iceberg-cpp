@@ -30,15 +30,25 @@
 /// - v4: Avro append, ids 200-202
 /// - v5: deletion vector deleting id 1 (position 1 of data-0.parquet)
 
+#include <algorithm>
 #include <memory>
 #include <string>
+#include <vector>
+
+#include <arrow/c/bridge.h>
+#include <arrow/record_batch.h>
+#include <arrow/scalar.h>
+#include <arrow/table.h>
 
 #include "iceberg/arrow/arrow_io_util.h"
+#include "iceberg/data/file_scan_task_reader.h"
 #include "iceberg/encryption/encrypting_file_io.h"
 #include "iceberg/encryption/in_memory_kms.h"
 #include "iceberg/encryption/standard_encryption_manager.h"
 #include "iceberg/file_io.h"
+#include "iceberg/table.h"
 #include "iceberg/table_metadata.h"
+#include "iceberg/table_scan.h"
 #include "iceberg/test/encryption_test_util.h"
 #include "iceberg/test/test_resource.h"
 #include "iceberg/util/macros.h"
@@ -113,5 +123,32 @@ struct JavaEncryptedTableFixture {
     return fixture;
   }
 };
+
+/// \brief Scan a table with a column "id" (long) and return the sorted ids.
+inline Result<std::vector<int64_t>> ScanTableIds(const Table& table) {
+  ICEBERG_ASSIGN_OR_RAISE(auto builder, table.NewScan());
+  ICEBERG_ASSIGN_OR_RAISE(auto scan, builder->Build());
+  ICEBERG_ASSIGN_OR_RAISE(auto tasks, scan->PlanFiles());
+  ICEBERG_ASSIGN_OR_RAISE(auto schema, table.schema());
+  ICEBERG_ASSIGN_OR_RAISE(auto reader,
+                          FileScanTaskReader::Make({.io = table.io(),
+                                                    .table_schema = schema,
+                                                    .schemas = {schema},
+                                                    .projected_schema = schema}));
+  std::vector<int64_t> ids;
+  for (const auto& task : tasks) {
+    ICEBERG_ASSIGN_OR_RAISE(auto stream, reader->Open(*task));
+    auto batches = ::arrow::ImportRecordBatchReader(&stream).ValueOrDie();
+    auto arrow_table = batches->ToTable().ValueOrDie();
+    auto id_column = arrow_table->GetColumnByName("id");
+    for (int64_t i = 0; i < arrow_table->num_rows(); ++i) {
+      ids.push_back(std::static_pointer_cast<::arrow::Int64Scalar>(
+                        id_column->GetScalar(i).ValueOrDie())
+                        ->value);
+    }
+  }
+  std::ranges::sort(ids);
+  return ids;
+}
 
 }  // namespace iceberg

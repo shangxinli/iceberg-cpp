@@ -83,10 +83,12 @@ struct ICEBERG_EXPORT EncryptionUtil {
       const std::shared_ptr<KeyManagementClient>& kms,
       const std::optional<std::string>& trusted_key_id = std::nullopt);
 
-  /// \brief Fails while writing to encrypted tables is not supported.
+  /// \brief Check that a commit to the table will write encrypted files.
   ///
-  /// TODO: remove once encrypted manifests, manifest lists and data files are written.
-  static Status CheckWriteSupported(const TableMetadata& metadata);
+  /// Fails if the table is encrypted but `io` is not an EncryptingFileIO (the catalog
+  /// has no KMS client), which would write plaintext manifests into an encrypted table.
+  static Status CheckCanWrite(const TableMetadata& metadata,
+                              const std::shared_ptr<FileIO>& io);
 };
 
 }  // namespace iceberg
