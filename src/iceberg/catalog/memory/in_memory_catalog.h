@@ -26,6 +26,7 @@
 #include <shared_mutex>
 
 #include "iceberg/catalog.h"
+#include "iceberg/encryption/key_management_client.h"
 
 namespace iceberg {
 
@@ -46,7 +47,8 @@ class ICEBERG_EXPORT InMemoryCatalog
   InMemoryCatalog(std::string name, std::shared_ptr<FileIO> file_io,
                   std::string warehouse_location,
                   std::unordered_map<std::string, std::string> properties,
-                  std::shared_ptr<MetricsReporter> reporter = nullptr);
+                  std::shared_ptr<MetricsReporter> reporter = nullptr,
+                  std::shared_ptr<KeyManagementClient> kms = nullptr);
   ~InMemoryCatalog() override;
 
   static Result<std::shared_ptr<InMemoryCatalog>> Make(
@@ -105,6 +107,9 @@ class ICEBERG_EXPORT InMemoryCatalog
       const std::string& metadata_file_location) override;
 
  private:
+  /// \brief The FileIO of a table: with its encryption manager if it is encrypted.
+  Result<std::shared_ptr<FileIO>> TableFileIO(const TableMetadata& metadata) const;
+
   std::string catalog_name_;
   std::unordered_map<std::string, std::string> properties_;
   std::shared_ptr<FileIO> file_io_;
@@ -112,6 +117,7 @@ class ICEBERG_EXPORT InMemoryCatalog
   std::unique_ptr<class InMemoryNamespace> root_namespace_;
   mutable std::shared_mutex mutex_;
   std::shared_ptr<MetricsReporter> reporter_;
+  std::shared_ptr<KeyManagementClient> kms_;
 };
 
 }  // namespace iceberg

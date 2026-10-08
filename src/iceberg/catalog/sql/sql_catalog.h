@@ -36,6 +36,7 @@
 #include "iceberg/catalog.h"
 #include "iceberg/catalog/sql/catalog_store.h"
 #include "iceberg/catalog/sql/iceberg_sql_catalog_export.h"
+#include "iceberg/encryption/key_management_client.h"
 #include "iceberg/result.h"
 #include "iceberg/table_identifier.h"
 #include "iceberg/type_fwd.h"
@@ -173,7 +174,11 @@ class ICEBERG_SQL_CATALOG_EXPORT SqlCatalog
  private:
   SqlCatalog(SqlCatalogConfig config, std::shared_ptr<FileIO> file_io,
              std::shared_ptr<CatalogStore> store,
-             std::shared_ptr<MetricsReporter> reporter);
+             std::shared_ptr<MetricsReporter> reporter,
+             std::shared_ptr<KeyManagementClient> kms);
+
+  /// \brief The FileIO of a table: with its encryption manager if it is encrypted.
+  Result<std::shared_ptr<FileIO>> TableFileIO(const TableMetadata& metadata) const;
 
   /// \brief Resolve the current metadata location for a table, or NoSuchTable.
   Result<std::string> GetTableMetadataLocation(const TableIdentifier& identifier) const;
@@ -186,6 +191,7 @@ class ICEBERG_SQL_CATALOG_EXPORT SqlCatalog
   std::shared_ptr<FileIO> file_io_;
   std::shared_ptr<CatalogStore> store_;
   std::shared_ptr<MetricsReporter> reporter_;
+  std::shared_ptr<KeyManagementClient> kms_;
 };
 
 }  // namespace iceberg::sql

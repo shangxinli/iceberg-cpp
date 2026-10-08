@@ -35,6 +35,7 @@
 #include <nlohmann/json.hpp>
 
 #include "iceberg/constants.h"
+#include "iceberg/encryption/encryption_util.h"
 #include "iceberg/exception.h"
 #include "iceberg/file_io.h"
 #include "iceberg/json_serde_internal.h"
@@ -1362,6 +1363,7 @@ Result<std::vector<SnapshotLogEntry>> TableMetadataBuilder::Impl::UpdateSnapshot
 
 Result<std::unique_ptr<TableMetadata>> TableMetadataBuilder::Impl::Build() {
   // 1. Validate metadata consistency through TableMetadata#Validate
+  ICEBERG_RETURN_UNEXPECTED(EncryptionUtil::ValidateProperties(base_, metadata_));
 
   // 2. Update last_updated_ms if there are changes
   if (metadata_.last_updated_ms == kInvalidLastUpdatedMs) {

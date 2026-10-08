@@ -30,6 +30,7 @@
 #include "iceberg/catalog/rest/type_fwd.h"
 #include "iceberg/catalog/session_catalog.h"
 #include "iceberg/catalog/session_context.h"
+#include "iceberg/encryption/key_management_client.h"
 #include "iceberg/result.h"
 #include "iceberg/storage_credential.h"
 #include "iceberg/type_fwd.h"
@@ -74,7 +75,8 @@ class ICEBERG_REST_EXPORT RestCatalog final
               std::unique_ptr<auth::AuthManager> auth_manager,
               std::shared_ptr<auth::AuthSession> catalog_session,
               SnapshotMode snapshot_mode, SessionContext default_context,
-              std::shared_ptr<MetricsReporter> reporter, Executor* metrics_executor);
+              std::shared_ptr<MetricsReporter> reporter, Executor* metrics_executor,
+              std::shared_ptr<KeyManagementClient> kms);
 
   Result<std::shared_ptr<auth::AuthSession>> ContextualAuthSession(
       const SessionContext& context);
@@ -203,6 +205,8 @@ class ICEBERG_REST_EXPORT RestCatalog final
   std::weak_ptr<Catalog> default_catalog_;
   std::shared_ptr<MetricsReporter> reporter_;
   Executor* metrics_executor_ = nullptr;
+  /// The KMS client of encrypted tables, from the client-side catalog properties.
+  std::shared_ptr<KeyManagementClient> kms_;
 };
 
 }  // namespace iceberg::rest

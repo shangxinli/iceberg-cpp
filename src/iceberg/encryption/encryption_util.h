@@ -23,6 +23,8 @@
 /// Table-level encryption policy.
 
 #include <memory>
+#include <optional>
+#include <string>
 
 #include "iceberg/iceberg_export.h"
 #include "iceberg/result.h"
@@ -31,11 +33,36 @@
 namespace iceberg {
 
 class FileIO;
+class KeyManagementClient;
 
 /// \brief Table-level encryption helpers.
 struct ICEBERG_EXPORT EncryptionUtil {
   /// \brief Whether the table is encrypted (has the `encryption.key-id` property).
   static bool IsEncrypted(const TableMetadata& metadata);
+
+  /// \brief Validate the encryption properties of new table metadata.
+  ///
+  /// Encryption properties require format version 3 or later, and the table key ID
+  /// cannot be changed or removed once set.
+  /// \param base the previous metadata, or nullptr for a new table
+  static Status ValidateProperties(const TableMetadata* base,
+                                   const TableMetadata& metadata);
+
+  /// \brief The FileIO of a table, for catalogs.
+  ///
+  /// Returns `io` for unencrypted tables, and an EncryptingFileIO over a new encryption
+  /// manager for encrypted tables. If the catalog has no KMS client, returns `io`:
+  /// reading encrypted files then fails with a clear error, and writing is rejected.
+  ///
+  /// \param io the catalog's FileIO for this table
+  /// \param metadata the table metadata
+  /// \param kms the catalog's KMS client, or nullptr
+  /// \param trusted_key_id the table key ID from a trusted source (e.g. the metastore),
+  /// when the catalog keeps one apart from metadata.json; it must match the metadata
+  static Result<std::shared_ptr<FileIO>> MakeTableFileIO(
+      std::shared_ptr<FileIO> io, const TableMetadata& metadata,
+      const std::shared_ptr<KeyManagementClient>& kms,
+      const std::optional<std::string>& trusted_key_id = std::nullopt);
 
   /// \brief Fails while writing to encrypted tables is not supported.
   ///

@@ -41,6 +41,7 @@
 #include "iceberg/catalog/rest/rest_metrics_reporter_internal.h"
 #include "iceberg/catalog/rest/rest_util.h"
 #include "iceberg/catalog/rest/types.h"
+#include "iceberg/encryption/encryption_util.h"
 #include "iceberg/json_serde_internal.h"
 #include "iceberg/metrics/metrics_reporters.h"
 #include "iceberg/partition_spec.h"
@@ -445,11 +446,16 @@ Result<std::shared_ptr<RestCatalog>> RestCatalog::Make(
     ICEBERG_ASSIGN_OR_RAISE(reporter, MetricsReporters::Load(props));
   }
 
+  // The KMS client is configured from the client-side properties only, never from
+  // configuration returned by the server.
+  ICEBERG_ASSIGN_OR_RAISE(auto kms, KmsRegistry::FromCatalogProperties(config.configs()));
+
   auto default_context = SessionContext::Empty();
   return std::shared_ptr<RestCatalog>(new RestCatalog(
       std::move(final_config), std::move(file_io), std::move(client), std::move(paths),
       std::move(endpoints), std::move(auth_manager), std::move(catalog_session),
-      snapshot_mode, std::move(default_context), std::move(reporter), metrics_executor));
+      snapshot_mode, std::move(default_context), std::move(reporter), metrics_executor,
+      std::move(kms)));
 }
 
 RestCatalog::RestCatalog(RestCatalogProperties config, std::shared_ptr<FileIO> file_io,
@@ -460,7 +466,8 @@ RestCatalog::RestCatalog(RestCatalogProperties config, std::shared_ptr<FileIO> f
                          std::shared_ptr<auth::AuthSession> catalog_session,
                          SnapshotMode snapshot_mode, SessionContext default_context,
                          std::shared_ptr<MetricsReporter> reporter,
-                         Executor* metrics_executor)
+                         Executor* metrics_executor,
+                         std::shared_ptr<KeyManagementClient> kms)
     : config_(std::move(config)),
       file_io_(std::move(file_io)),
       client_(std::move(client)),
@@ -472,7 +479,8 @@ RestCatalog::RestCatalog(RestCatalogProperties config, std::shared_ptr<FileIO> f
       snapshot_mode_(snapshot_mode),
       default_context_(std::move(default_context)),
       reporter_(std::move(reporter)),
-      metrics_executor_(metrics_executor) {
+      metrics_executor_(metrics_executor),
+      kms_(std::move(kms)) {
   ICEBERG_DCHECK(catalog_session_ != nullptr, "catalog_session must not be null");
 }
 
@@ -781,10 +789,13 @@ Result<std::shared_ptr<Transaction>> RestCatalog::StageCreateTable(
   auto table_catalog = std::make_shared<TableScopedCatalog>(
       shared_from_this(), context, identifier, table_config, std::move(table_session),
       table_io);
+  // The REST server is trusted for the table key ID in the metadata it returns.
+  ICEBERG_ASSIGN_OR_RAISE(auto encrypting_io, EncryptionUtil::MakeTableFileIO(
+                                                  table_io, *result.metadata, kms_));
   ICEBERG_ASSIGN_OR_RAISE(
       auto staged_table,
       StagedTable::Make(identifier, std::move(result.metadata),
-                        std::move(result.metadata_location), std::move(table_io),
+                        std::move(result.metadata_location), std::move(encrypting_io),
                         std::move(table_catalog), RestTableName(name_, identifier),
                         std::move(reporter)));
   return Transaction::Make(std::move(staged_table), TransactionKind::kCreate);
@@ -899,8 +910,11 @@ Result<std::shared_ptr<Table>> RestCatalog::MakeTableFromLoadResult(
   auto table_catalog = std::make_shared<TableScopedCatalog>(
       shared_from_this(), context, identifier, table_config, table_session, table_io);
 
+  // The REST server is trusted for the table key ID in the metadata it returns.
+  ICEBERG_ASSIGN_OR_RAISE(auto encrypting_io, EncryptionUtil::MakeTableFileIO(
+                                                  table_io, *result.metadata, kms_));
   return Table::Make(identifier, std::move(result.metadata),
-                     std::move(result.metadata_location), std::move(table_io),
+                     std::move(result.metadata_location), std::move(encrypting_io),
                      std::move(table_catalog), RestTableName(name_, identifier),
                      std::move(reporter));
 }
@@ -914,8 +928,11 @@ Result<std::shared_ptr<Table>> RestCatalog::MakeTableFromCommitResponse(
   // Reuse the bound FileIO because commit responses carry no config or credentials.
   auto table_catalog = std::make_shared<TableScopedCatalog>(
       shared_from_this(), context, identifier, table_config, table_session, table_io);
+  // A new encryption manager sees the keys committed with the new metadata.
+  ICEBERG_ASSIGN_OR_RAISE(auto encrypting_io, EncryptionUtil::MakeTableFileIO(
+                                                  table_io, *response.metadata, kms_));
   return Table::Make(identifier, std::move(response.metadata),
-                     std::move(response.metadata_location), std::move(table_io),
+                     std::move(response.metadata_location), std::move(encrypting_io),
                      std::move(table_catalog), RestTableName(name_, identifier),
                      std::move(reporter));
 }

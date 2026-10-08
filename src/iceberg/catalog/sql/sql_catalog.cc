@@ -25,6 +25,8 @@
 
 #include "iceberg/catalog/catalog_util.h"
 #include "iceberg/catalog/sql/config.h"
+#include "iceberg/encryption/encryption_util.h"
+#include "iceberg/encryption/key_management_client.h"
 #include "iceberg/file_io.h"
 #include "iceberg/metrics/metrics_reporters.h"
 #include "iceberg/table.h"
@@ -131,13 +133,22 @@ Result<std::string> ResolveTableLocation(
 
 SqlCatalog::SqlCatalog(SqlCatalogConfig config, std::shared_ptr<FileIO> file_io,
                        std::shared_ptr<CatalogStore> store,
-                       std::shared_ptr<MetricsReporter> reporter)
+                       std::shared_ptr<MetricsReporter> reporter,
+                       std::shared_ptr<KeyManagementClient> kms)
     : config_(std::move(config)),
       file_io_(std::move(file_io)),
       store_(std::move(store)),
-      reporter_(std::move(reporter)) {}
+      reporter_(std::move(reporter)),
+      kms_(std::move(kms)) {}
 
 SqlCatalog::~SqlCatalog() = default;
+
+Result<std::shared_ptr<FileIO>> SqlCatalog::TableFileIO(
+    const TableMetadata& metadata) const {
+  // The catalog database keeps the committed metadata location, so the table key ID in
+  // that metadata is trusted.
+  return EncryptionUtil::MakeTableFileIO(file_io_, metadata, kms_);
+}
 
 Result<std::shared_ptr<SqlCatalog>> SqlCatalog::Make(
     const SqlCatalogConfig& config, std::shared_ptr<FileIO> file_io,
@@ -158,8 +169,9 @@ Result<std::shared_ptr<SqlCatalog>> SqlCatalog::Make(
     ICEBERG_ASSIGN_OR_RAISE(reporter, MetricsReporters::Load(props));
   }
 
-  return std::shared_ptr<SqlCatalog>(
-      new SqlCatalog(config, std::move(file_io), std::move(store), std::move(reporter)));
+  ICEBERG_ASSIGN_OR_RAISE(auto kms, KmsRegistry::FromCatalogProperties(props));
+  return std::shared_ptr<SqlCatalog>(new SqlCatalog(
+      config, std::move(file_io), std::move(store), std::move(reporter), std::move(kms)));
 }
 
 std::string_view SqlCatalog::name() const { return config_.name; }
@@ -383,9 +395,10 @@ Result<std::shared_ptr<Table>> SqlCatalog::LoadTableFrom(
     const TableIdentifier& identifier, const std::string& metadata_location) {
   ICEBERG_ASSIGN_OR_RAISE(auto metadata,
                           TableMetadataUtil::Read(*file_io_, metadata_location));
-  return Table::Make(identifier, std::move(metadata), metadata_location, file_io_,
-                     shared_from_this(), CatalogUtil::FullTableName(name(), identifier),
-                     reporter_);
+  ICEBERG_ASSIGN_OR_RAISE(auto table_io, TableFileIO(*metadata));
+  return Table::Make(identifier, std::move(metadata), metadata_location,
+                     std::move(table_io), shared_from_this(),
+                     CatalogUtil::FullTableName(name(), identifier), reporter_);
 }
 
 Result<std::shared_ptr<Table>> SqlCatalog::LoadTable(const TableIdentifier& identifier) {
@@ -421,10 +434,11 @@ Result<std::shared_ptr<Table>> SqlCatalog::CreateTable(
   const std::string ns_str = NamespaceToString(identifier.ns);
   ICEBERG_RETURN_UNEXPECTED(
       store_->InsertTable(ns_str, identifier.name, metadata_location));
+  ICEBERG_ASSIGN_OR_RAISE(auto table_io, TableFileIO(*metadata));
 
-  return Table::Make(identifier, std::move(metadata), metadata_location, file_io_,
-                     shared_from_this(), CatalogUtil::FullTableName(name(), identifier),
-                     reporter_);
+  return Table::Make(identifier, std::move(metadata), metadata_location,
+                     std::move(table_io), shared_from_this(),
+                     CatalogUtil::FullTableName(name(), identifier), reporter_);
 }
 
 Result<std::shared_ptr<Table>> SqlCatalog::UpdateTable(
@@ -487,10 +501,11 @@ Result<std::shared_ptr<Table>> SqlCatalog::UpdateTable(
     }
     TableMetadataUtil::DeleteRemovedMetadataFiles(*file_io_, base.get(), *updated);
   }
+  ICEBERG_ASSIGN_OR_RAISE(auto table_io, TableFileIO(*updated));
 
-  return Table::Make(identifier, std::move(updated), new_metadata_location, file_io_,
-                     shared_from_this(), CatalogUtil::FullTableName(name(), identifier),
-                     reporter_);
+  return Table::Make(identifier, std::move(updated), new_metadata_location,
+                     std::move(table_io), shared_from_this(),
+                     CatalogUtil::FullTableName(name(), identifier), reporter_);
 }
 
 Result<std::shared_ptr<Transaction>> SqlCatalog::StageCreateTable(
@@ -515,9 +530,11 @@ Result<std::shared_ptr<Transaction>> SqlCatalog::StageCreateTable(
       ResolveTableLocation(config_, identifier, namespace_properties, location));
   ICEBERG_ASSIGN_OR_RAISE(auto metadata, TableMetadata::Make(*schema, *spec, *order,
                                                              base_location, properties));
+  ICEBERG_ASSIGN_OR_RAISE(auto table_io, TableFileIO(*metadata));
   ICEBERG_ASSIGN_OR_RAISE(
       auto table,
-      StagedTable::Make(identifier, std::move(metadata), "", file_io_, shared_from_this(),
+      StagedTable::Make(identifier, std::move(metadata), "", std::move(table_io),
+                        shared_from_this(),
                         CatalogUtil::FullTableName(name(), identifier), reporter_));
   return Transaction::Make(std::move(table), TransactionKind::kCreate);
 }
@@ -596,10 +613,11 @@ Result<std::shared_ptr<Table>> SqlCatalog::RegisterTable(
   const std::string ns_str = NamespaceToString(identifier.ns);
   ICEBERG_RETURN_UNEXPECTED(
       store_->InsertTable(ns_str, identifier.name, metadata_file_location));
+  ICEBERG_ASSIGN_OR_RAISE(auto table_io, TableFileIO(*metadata));
 
-  return Table::Make(identifier, std::move(metadata), metadata_file_location, file_io_,
-                     shared_from_this(), CatalogUtil::FullTableName(name(), identifier),
-                     reporter_);
+  return Table::Make(identifier, std::move(metadata), metadata_file_location,
+                     std::move(table_io), shared_from_this(),
+                     CatalogUtil::FullTableName(name(), identifier), reporter_);
 }
 
 // --------------------------------------------------------------------------
