@@ -68,6 +68,25 @@ Tables loaded from a catalog with a KMS client have an `EncryptingFileIO`; scans
 writers and commits use it to encrypt and decrypt files. A catalog without a KMS
 client can load an encrypted table but cannot read or commit to it.
 
+## Cloud KMS clients
+
+The `aws`, `gcp` and `azure` clients are in the optional `iceberg_kms` library
+(CMake option `ICEBERG_BUILD_KMS`). They call the services' REST APIs over libcurl,
+without a cloud SDK, and register themselves when the library is linked; call
+`iceberg::kms::RegisterAll()` if the linker drops the static registration.
+
+| KMS type | Wrapping key ID | Properties |
+|---|---|---|
+| `aws` | Key ID, ARN or alias | `client.region`, `kms.encryption-algorithm-spec` (default `SYMMETRIC_DEFAULT`), `kms.data-key-spec` (default `AES_256`); C++ only: `kms.endpoint`, `kms.access-key-id`, `kms.secret-access-key`, `kms.session-token` |
+| `gcp` | `projects/*/locations/*/keyRings/*/cryptoKeys/*` | `gcs.oauth2.token` (required); C++ only: `gcp.kms.endpoint` |
+| `azure` | Key name, optionally `name/version` | `azure.keyvault.url` (required), `azure.keyvault.key-wrap-algorithm` (default `RSA-OAEP-256`); C++ only: `azure.keyvault.token` (required) |
+
+AWS credentials default to the `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and
+`AWS_SESSION_TOKEN` environment variables, and the region to `AWS_REGION`. Requests
+are signed with Signature Version 4. Other credential providers (instance profiles,
+Google application default credentials, Azure managed identities) are not supported;
+pass a token, or register a custom client.
+
 ## Security
 
 - The table key ID must come from a trusted source. Catalogs that keep a copy apart

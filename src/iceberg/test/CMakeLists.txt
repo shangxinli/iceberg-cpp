@@ -304,6 +304,13 @@ if(ICEBERG_BUILD_SQL_CATALOG
   add_test(NAME sql_catalog_test COMMAND sql_catalog_test)
 endif()
 
+if(ICEBERG_BUILD_KMS)
+  add_iceberg_test(kms_clients_test SOURCES kms_clients_test.cc)
+  target_link_libraries(kms_clients_test
+                        PRIVATE "$<IF:$<TARGET_EXISTS:iceberg_kms_static>,iceberg_kms_static,iceberg_kms_shared>"
+  )
+endif()
+
 if(ICEBERG_BUILD_REST)
   function(add_rest_iceberg_test test_name)
     set(options USE_BUNDLE)

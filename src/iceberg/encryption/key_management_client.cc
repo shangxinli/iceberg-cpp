@@ -56,8 +56,8 @@ Result<std::shared_ptr<KeyManagementClient>> KmsRegistry::Load(
     if (it == state.factories.end()) {
       return NotFound(
           "KMS client not found: {}. Built-in clients must be enabled at build time "
-          "(ICEBERG_KMS_AWS, ICEBERG_KMS_GCP, ICEBERG_KMS_AZURE); custom clients must be "
-          "registered with KmsRegistry::Register",
+          "(ICEBERG_BUILD_KMS, library iceberg_kms); custom clients must be registered "
+          "with KmsRegistry::Register",
           name);
     }
     factory = it->second;

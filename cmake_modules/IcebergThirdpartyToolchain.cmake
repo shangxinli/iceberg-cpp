@@ -927,7 +927,12 @@ if(ICEBERG_BUILD_BUNDLE)
   resolve_zstd_dependency()
 endif()
 
-if(ICEBERG_BUILD_REST)
+# The KMS clients sign AWS requests with OpenSSL.
+if(ICEBERG_BUILD_KMS AND NOT TARGET OpenSSL::Crypto)
+  resolve_openssl_for_encryption()
+endif()
+
+if(ICEBERG_BUILD_REST OR ICEBERG_BUILD_KMS)
   resolve_cpr_dependency()
 endif()
 

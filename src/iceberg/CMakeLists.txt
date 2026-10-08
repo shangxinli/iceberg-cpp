@@ -416,6 +416,10 @@ if(ICEBERG_BUILD_BUNDLE)
   add_subdirectory(parquet)
 endif()
 
+if(ICEBERG_BUILD_KMS)
+  add_subdirectory(kms)
+endif()
+
 iceberg_install_cmake_package(iceberg iceberg_targets)
 
 # When linking a system Thrift, downstream find_package(Iceberg) calls

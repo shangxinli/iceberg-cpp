@@ -44,6 +44,9 @@ option(ICEBERG_BUILD_BUNDLE "Build the battery included library" ON)
 option(ICEBERG_ENCRYPTION
        "Build table encryption support (Parquet modular encryption, AES GCM streams)" ON)
 option(ICEBERG_BUILD_REST "Build rest catalog client" ON)
+option(ICEBERG_BUILD_KMS
+       "Build the AWS KMS, Google Cloud KMS and Azure Key Vault clients (iceberg_kms)"
+       OFF)
 option(ICEBERG_BUILD_REST_INTEGRATION_TESTS "Build rest catalog integration tests" OFF)
 option(ICEBERG_BUILD_HIVE "Build hive (HMS) catalog client" OFF)
 option(ICEBERG_BUILD_SQL_CATALOG "Build SQL catalog client" OFF)
