@@ -26,6 +26,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <vector>
 
 #include "iceberg/arrow_c_data.h"
 #include "iceberg/file_format.h"
@@ -114,6 +115,9 @@ struct ICEBERG_EXPORT ReaderOptions {
   std::optional<int64_t> first_row_id;
   /// \brief Data sequence number inherited by the manifest entry, if assigned.
   std::optional<int64_t> data_sequence_number;
+  /// \brief Serialized StandardKeyMetadata for formats with native encryption
+  /// (Parquet modular encryption). Empty for plaintext files.
+  std::vector<uint8_t> key_metadata;
   /// \brief Format-specific or implementation-specific properties.
   ReaderProperties properties;
 };

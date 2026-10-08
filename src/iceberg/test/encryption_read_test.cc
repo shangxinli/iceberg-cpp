@@ -23,12 +23,19 @@
 #include <map>
 #include <tuple>
 
+#include <arrow/c/bridge.h>
+#include <arrow/record_batch.h>
+#include <arrow/scalar.h>
+#include <arrow/table.h>
 #include <gtest/gtest.h>
 
 #include "iceberg/avro/avro_register.h"
+#include "iceberg/data/file_scan_task_reader.h"
+#include "iceberg/file_reader.h"
 #include "iceberg/manifest/manifest_entry.h"
 #include "iceberg/manifest/manifest_list.h"
 #include "iceberg/manifest/manifest_reader.h"
+#include "iceberg/parquet/parquet_register.h"
 #include "iceberg/snapshot.h"
 #include "iceberg/table.h"
 #include "iceberg/table_scan.h"
@@ -39,7 +46,43 @@ namespace iceberg {
 
 class EncryptionReadTest : public ::testing::Test {
  protected:
-  static void SetUpTestSuite() { avro::RegisterAll(); }
+  static void SetUpTestSuite() {
+    avro::RegisterAll();
+    parquet::RegisterAll();
+  }
+
+  /// Scan the table and return the sorted ids.
+  static Result<std::vector<int64_t>> ScanIds(const Table& table) {
+    ICEBERG_ASSIGN_OR_RAISE(auto builder, table.NewScan());
+    ICEBERG_ASSIGN_OR_RAISE(auto scan, builder->Build());
+    ICEBERG_ASSIGN_OR_RAISE(auto tasks, scan->PlanFiles());
+    ICEBERG_ASSIGN_OR_RAISE(auto schema, table.schema());
+    ICEBERG_ASSIGN_OR_RAISE(auto reader,
+                            FileScanTaskReader::Make({.io = table.io(),
+                                                      .table_schema = schema,
+                                                      .schemas = {schema},
+                                                      .projected_schema = schema}));
+    std::vector<int64_t> ids;
+    for (const auto& task : tasks) {
+      ICEBERG_ASSIGN_OR_RAISE(auto stream, reader->Open(*task));
+      auto batches = ::arrow::ImportRecordBatchReader(&stream).ValueOrDie();
+      auto arrow_table = batches->ToTable().ValueOrDie();
+      auto id_column = arrow_table->GetColumnByName("id");
+      for (int64_t i = 0; i < arrow_table->num_rows(); ++i) {
+        ids.push_back(std::static_pointer_cast<::arrow::Int64Scalar>(
+                          id_column->GetScalar(i).ValueOrDie())
+                          ->value);
+      }
+    }
+    std::ranges::sort(ids);
+    return ids;
+  }
+
+  static Result<std::shared_ptr<Table>> LoadTable(int version) {
+    ICEBERG_ASSIGN_OR_RAISE(auto fixture, JavaEncryptedTableFixture::Load(version));
+    return StaticTable::Make(TableIdentifier{.name = "t"}, fixture.metadata,
+                             fixture.metadata_location, fixture.io);
+  }
 };
 
 TEST_F(EncryptionReadTest, ReadsManifestLists) {
@@ -137,6 +180,48 @@ TEST_F(EncryptionReadTest, PlansScans) {
     }
     EXPECT_EQ(deletes, delete_files) << "v" << version;
   }
+}
+
+TEST_F(EncryptionReadTest, ReadsDataFiles) {
+  // v2: one Parquet file
+  ICEBERG_UNWRAP_OR_FAIL(auto v2, LoadTable(2));
+  ICEBERG_UNWRAP_OR_FAIL(auto v2_ids, ScanIds(*v2));
+  EXPECT_EQ(v2_ids, (std::vector<int64_t>{0, 1, 2, 3, 4}));
+
+  // v4: two Parquet files (modular encryption) and one Avro file (AES GCM stream)
+  ICEBERG_UNWRAP_OR_FAIL(auto v4, LoadTable(4));
+  ICEBERG_UNWRAP_OR_FAIL(auto v4_ids, ScanIds(*v4));
+  EXPECT_EQ(v4_ids, (std::vector<int64_t>{0, 1, 2, 3, 4, 100, 101, 102, 103, 104, 200,
+                                          201, 202}));
+}
+
+TEST_F(EncryptionReadTest, WrongKeyFailsCleanly) {
+  ICEBERG_UNWRAP_OR_FAIL(auto fixture, JavaEncryptedTableFixture::Load(2));
+  ICEBERG_UNWRAP_OR_FAIL(auto schema, fixture.metadata->Schema());
+  ICEBERG_UNWRAP_OR_FAIL(auto table,
+                         StaticTable::Make(TableIdentifier{.name = "t"}, fixture.metadata,
+                                           fixture.metadata_location, fixture.io));
+  ICEBERG_UNWRAP_OR_FAIL(auto builder, table->NewScan());
+  ICEBERG_UNWRAP_OR_FAIL(auto scan, builder->Build());
+  ICEBERG_UNWRAP_OR_FAIL(auto tasks, scan->PlanFiles());
+  ASSERT_EQ(tasks.size(), 1);
+  const auto& data_file = *tasks[0]->data_file();
+
+  // The right key with another file's AAD prefix (a swapped file) is rejected
+  ICEBERG_UNWRAP_OR_FAIL(auto key_metadata,
+                         StandardKeyMetadata::Parse(data_file.key_metadata));
+  key_metadata.aad_prefix->at(0) ^= 1;
+  EXPECT_THAT(ReaderFactoryRegistry::Open(FileFormatType::kParquet,
+                                          {.path = data_file.file_path,
+                                           .io = fixture.io,
+                                           .projection = schema,
+                                           .key_metadata = key_metadata.Serialize()}),
+              IsError(ErrorKind::kInvalid));
+  // Without the key the encrypted footer cannot be read
+  EXPECT_THAT(ReaderFactoryRegistry::Open(
+                  FileFormatType::kParquet,
+                  {.path = data_file.file_path, .io = fixture.io, .projection = schema}),
+              IsError(ErrorKind::kInvalid));
 }
 
 }  // namespace iceberg

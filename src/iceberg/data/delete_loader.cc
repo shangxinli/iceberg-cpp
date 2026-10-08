@@ -33,6 +33,7 @@
 #include "iceberg/deletes/dv_util_internal.h"
 #include "iceberg/deletes/position_delete_index.h"
 #include "iceberg/deletes/position_delete_range_consumer.h"
+#include "iceberg/encryption/encrypting_file_io.h"
 #include "iceberg/file_io.h"
 #include "iceberg/file_reader.h"
 #include "iceberg/manifest/manifest_entry.h"
@@ -67,6 +68,14 @@ Result<std::unique_ptr<Reader>> OpenDeleteFile(const DataFile& file,
       .io = io,
       .projection = std::move(projection),
   };
+  if (!file.key_metadata.empty()) {
+    if (file.file_format == FileFormatType::kParquet) {
+      options.key_metadata = file.key_metadata;
+    } else {
+      ICEBERG_ASSIGN_OR_RAISE(options.io,
+                              EncryptingFileIO::ForFile(io, file.key_metadata));
+    }
+  }
   return ReaderFactoryRegistry::Open(file.file_format, options);
 }
 

@@ -28,6 +28,7 @@
 #include "iceberg/arrow_c_data_guard_internal.h"
 #include "iceberg/arrow_c_data_util_internal.h"
 #include "iceberg/data/delete_filter.h"
+#include "iceberg/encryption/encrypting_file_io.h"
 #include "iceberg/file_reader.h"
 #include "iceberg/manifest/manifest_entry.h"
 #include "iceberg/schema.h"
@@ -39,13 +40,20 @@ namespace iceberg {
 
 namespace {
 
-ReaderOptions MakeReaderOptions(const DataFile& data_file, std::shared_ptr<FileIO> io,
-                                std::shared_ptr<Schema> projection,
-                                std::shared_ptr<Expression> filter,
-                                std::shared_ptr<NameMapping> name_mapping,
-                                ReaderProperties properties,
-                                std::optional<int64_t> first_row_id,
-                                std::optional<int64_t> data_sequence_number) {
+Result<ReaderOptions> MakeReaderOptions(
+    const DataFile& data_file, std::shared_ptr<FileIO> io,
+    std::shared_ptr<Schema> projection, std::shared_ptr<Expression> filter,
+    std::shared_ptr<NameMapping> name_mapping, ReaderProperties properties,
+    std::optional<int64_t> first_row_id, std::optional<int64_t> data_sequence_number) {
+  std::vector<uint8_t> native_key_metadata;
+  if (!data_file.key_metadata.empty()) {
+    if (data_file.file_format == FileFormatType::kParquet) {
+      native_key_metadata = data_file.key_metadata;
+    } else {
+      // Other formats are encrypted as AES GCM streams.
+      ICEBERG_ASSIGN_OR_RAISE(io, EncryptingFileIO::ForFile(io, data_file.key_metadata));
+    }
+  }
   return ReaderOptions{
       .path = data_file.file_path,
       .length = static_cast<size_t>(data_file.file_size_in_bytes),
@@ -55,6 +63,7 @@ ReaderOptions MakeReaderOptions(const DataFile& data_file, std::shared_ptr<FileI
       .name_mapping = std::move(name_mapping),
       .first_row_id = first_row_id,
       .data_sequence_number = data_sequence_number,
+      .key_metadata = std::move(native_key_metadata),
       .properties = std::move(properties),
   };
 }
@@ -165,9 +174,11 @@ class FileScanTaskReader::Impl {
                      data_file->file_size_in_bytes);
 
     if (task.delete_files().empty()) {
-      auto options = MakeReaderOptions(
-          *data_file, io_, projected_schema_, task.residual_filter(), name_mapping_,
-          properties_, data_file->first_row_id, data_file->data_sequence_number);
+      ICEBERG_ASSIGN_OR_RAISE(
+          auto options,
+          MakeReaderOptions(*data_file, io_, projected_schema_, task.residual_filter(),
+                            name_mapping_, properties_, data_file->first_row_id,
+                            data_file->data_sequence_number));
       ICEBERG_ASSIGN_OR_RAISE(
           auto reader, ReaderFactoryRegistry::Open(data_file->file_format, options));
       return MakeArrowArrayStream(std::move(reader));
@@ -191,9 +202,11 @@ class FileScanTaskReader::Impl {
                             ProjectionContext::Make(*required_schema, *projected_schema_,
                                                     project_batch_function));
 
-    auto options = MakeReaderOptions(
-        *data_file, io_, required_schema, task.residual_filter(), name_mapping_,
-        properties_, data_file->first_row_id, data_file->data_sequence_number);
+    ICEBERG_ASSIGN_OR_RAISE(
+        auto options,
+        MakeReaderOptions(*data_file, io_, required_schema, task.residual_filter(),
+                          name_mapping_, properties_, data_file->first_row_id,
+                          data_file->data_sequence_number));
     ICEBERG_ASSIGN_OR_RAISE(auto reader,
                             ReaderFactoryRegistry::Open(data_file->file_format, options));
 

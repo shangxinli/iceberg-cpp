@@ -30,14 +30,18 @@
 #include <arrow/result.h>
 #include <arrow/type.h>
 #include <arrow/util/key_value_metadata.h>
+#include <arrow/util/secure_string.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/schema.h>
+#include <parquet/encryption/encryption.h>
+#include <parquet/exception.h>
 #include <parquet/file_reader.h>
 #include <parquet/properties.h>
 
 #include "iceberg/arrow/arrow_io_internal.h"
 #include "iceberg/arrow/arrow_status_internal.h"
 #include "iceberg/arrow/metadata_column_util_internal.h"
+#include "iceberg/encryption/standard_key_metadata.h"
 #include "iceberg/parquet/parquet_data_util_internal.h"
 #include "iceberg/parquet/parquet_register.h"
 #include "iceberg/parquet/parquet_schema_util_internal.h"
@@ -297,6 +301,22 @@ class ParquetReader::Impl {
       arrow_reader_properties.set_list_type(::arrow::Type::LARGE_LIST);
     }
 
+    // Parquet modular encryption: footer key and AAD prefix come from the Iceberg key
+    // metadata. The AAD prefix is not stored in the file (Java writes it with
+    // withoutAADPrefixStorage), which binds the file to its manifest entry.
+    if (!options.key_metadata.empty()) {
+      ICEBERG_ASSIGN_OR_RAISE(auto key_metadata,
+                              StandardKeyMetadata::Parse(options.key_metadata));
+      ::parquet::FileDecryptionProperties::Builder builder;
+      builder.footer_key(::arrow::util::SecureString(std::string(
+          key_metadata.encryption_key.begin(), key_metadata.encryption_key.end())));
+      if (key_metadata.aad_prefix.has_value()) {
+        builder.aad_prefix(std::string(key_metadata.aad_prefix->begin(),
+                                       key_metadata.aad_prefix->end()));
+      }
+      reader_properties.file_decryption_properties(builder.build());
+    }
+
     // Open the Parquet file reader
     ICEBERG_ASSIGN_OR_RAISE(input_stream_, OpenInputStream(options));
     auto file_reader =
@@ -478,7 +498,12 @@ Result<std::unordered_map<std::string, std::string>> ParquetReader::Metadata() {
 
 Status ParquetReader::Open(const ReaderOptions& options) {
   impl_ = std::make_unique<Impl>();
-  return impl_->Open(options);
+  try {
+    return impl_->Open(options);
+  } catch (const ::parquet::ParquetException& e) {
+    // e.g. a wrong key or AAD prefix for an encrypted file, or a corrupt file
+    return Invalid("Failed to open Parquet file {}: {}", options.path, e.what());
+  }
 }
 
 Status ParquetReader::Close() { return impl_->Close(); }
