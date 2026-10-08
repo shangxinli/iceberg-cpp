@@ -46,11 +46,12 @@ struct ICEBERG_DATA_EXPORT EqualityDeleteWriterOptions {
   std::shared_ptr<PartitionSpec> spec;
   PartitionValues partition;
   FileFormatType format = FileFormatType::kParquet;
+  /// The FileIO of the table. With an encrypted table's EncryptingFileIO, the file is
+  /// encrypted and its key metadata recorded in the result.
   std::shared_ptr<FileIO> io;
   std::vector<int32_t> equality_field_ids;
   std::optional<int32_t> sort_order_id;
   std::unordered_map<std::string, std::string> properties;
-  // TODO(anyone): add key_metadata for encryption
 };
 
 /// \brief Writer for Iceberg equality delete files.

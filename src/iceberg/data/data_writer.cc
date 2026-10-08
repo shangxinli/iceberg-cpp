@@ -34,7 +34,6 @@ namespace iceberg {
 class DataWriter::Impl {
  public:
   static Result<std::unique_ptr<Impl>> Make(DataWriterOptions options) {
-    ICEBERG_RETURN_UNEXPECTED(EncryptionUtil::CheckWriteSupported(options.io));
     WriterOptions writer_options{
         .path = options.path,
         .schema = options.schema,
@@ -42,10 +41,13 @@ class DataWriter::Impl {
         .properties = WriterProperties::FromMap(options.properties),
     };
 
+    ICEBERG_ASSIGN_OR_RAISE(auto key_metadata, EncryptionUtil::PrepareFileWrite(
+                                                   options.format, writer_options));
     ICEBERG_ASSIGN_OR_RAISE(auto writer,
                             WriterFactoryRegistry::Open(options.format, writer_options));
 
-    return std::unique_ptr<Impl>(new Impl(std::move(options), std::move(writer)));
+    return std::unique_ptr<Impl>(
+        new Impl(std::move(options), std::move(writer), std::move(key_metadata)));
   }
 
   Status Write(ArrowArray* data) { return writer_->Write(data); }
@@ -102,17 +104,24 @@ class DataWriter::Impl {
             options_.spec ? std::make_optional(options_.spec->spec_id()) : std::nullopt,
     });
 
+    data_file->key_metadata = EncryptionUtil::FileKeyMetadata(key_metadata_, length);
+
     WriteResult result;
     result.data_files.push_back(std::move(data_file));
     return result;
   }
 
  private:
-  Impl(DataWriterOptions options, std::unique_ptr<Writer> writer)
-      : options_(std::move(options)), writer_(std::move(writer)) {}
+  Impl(DataWriterOptions options, std::unique_ptr<Writer> writer,
+       std::optional<StandardKeyMetadata> key_metadata)
+      : options_(std::move(options)),
+        writer_(std::move(writer)),
+        key_metadata_(std::move(key_metadata)) {}
 
   DataWriterOptions options_;
   std::unique_ptr<Writer> writer_;
+  // Set when the file is encrypted.
+  std::optional<StandardKeyMetadata> key_metadata_;
   bool closed_ = false;
 };
 

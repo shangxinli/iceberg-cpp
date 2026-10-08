@@ -22,19 +22,25 @@
 #include <filesystem>
 #include <fstream>
 
+#include <arrow/c/bridge.h>
+#include <arrow/json/from_string.h>
+#include <arrow/type.h>
 #include <gtest/gtest.h>
 
 #include "iceberg/avro/avro_register.h"
 #include "iceberg/catalog/memory/in_memory_catalog.h"
 #include "iceberg/data/data_writer.h"
+#include "iceberg/data/position_delete_writer.h"
 #include "iceberg/encryption/encryption_register.h"
 #include "iceberg/encryption/encryption_util.h"
+#include "iceberg/file_reader.h"
 #include "iceberg/manifest/manifest_entry.h"
 #include "iceberg/manifest/manifest_reader.h"
 #include "iceberg/manifest/manifest_writer.h"
 #include "iceberg/parquet/parquet_register.h"
 #include "iceberg/partition_spec.h"
 #include "iceberg/schema.h"
+#include "iceberg/schema_internal.h"
 #include "iceberg/snapshot.h"
 #include "iceberg/sort_order.h"
 #include "iceberg/table.h"
@@ -61,18 +67,7 @@ class EncryptionWriteTest : public TempFileTestBase {
       /*schema_id=*/0);
 };
 
-TEST_F(EncryptionWriteTest, WritesAreBlockedUntilSupported) {
-  ICEBERG_UNWRAP_OR_FAIL(auto fixture, JavaEncryptedTableFixture::Load(2));
-
-  // Data writers refuse the FileIO of an encrypted table
-  EXPECT_THAT(DataWriter::Make({.path = CreateNewTempFilePath(),
-                                .schema = schema_,
-                                .spec = PartitionSpec::Unpartitioned(),
-                                .partition = PartitionValues{},
-                                .format = FileFormatType::kParquet,
-                                .io = fixture.io}),
-              IsError(ErrorKind::kNotSupported));
-
+TEST_F(EncryptionWriteTest, CommitsAreBlockedUntilSupported) {
   // Snapshot updates refuse encrypted tables
   auto warehouse = CreateNewTempFilePath();
   std::filesystem::create_directories(warehouse + "/t/metadata");
@@ -285,6 +280,81 @@ TEST_F(EncryptionWriteTest, PlainManifestLengthIsUnchanged) {
   EXPECT_TRUE(manifest.key_metadata.empty());
   EXPECT_EQ(manifest.manifest_length,
             static_cast<int64_t>(std::filesystem::file_size(manifest_path)));
+}
+
+TEST_F(EncryptionWriteTest, WritesEncryptedDataFiles) {
+  ICEBERG_UNWRAP_OR_FAIL(auto fixture, JavaEncryptedTableFixture::Load(2));
+  ArrowSchema c_schema;
+  ASSERT_THAT(ToArrowSchema(*schema_, &c_schema), IsOk());
+  auto arrow_type =
+      ::arrow::struct_(::arrow::ImportType(&c_schema).ValueOrDie()->fields());
+
+  for (auto [format, magic] : {std::pair{FileFormatType::kParquet, "PARE"},
+                               std::pair{FileFormatType::kAvro, "AGS1"}}) {
+    auto path = CreateNewTempFilePath();
+    ICEBERG_UNWRAP_OR_FAIL(auto writer,
+                           DataWriter::Make({.path = path,
+                                             .schema = schema_,
+                                             .spec = PartitionSpec::Unpartitioned(),
+                                             .partition = PartitionValues{},
+                                             .format = format,
+                                             .io = fixture.io}));
+    auto array = ::arrow::json::ArrayFromJSONString(arrow_type,
+                                                    R"([[1, "a"], [2, "b"], [3, "c"]])")
+                     .ValueOrDie();
+    ArrowArray c_array;
+    ASSERT_TRUE(::arrow::ExportArray(*array, &c_array).ok());
+    ASSERT_THAT(writer->Write(&c_array), IsOk());
+    ASSERT_THAT(writer->Close(), IsOk());
+    ICEBERG_UNWRAP_OR_FAIL(auto result, writer->Metadata());
+    const auto& data_file = *result.data_files.front();
+
+    EXPECT_EQ(ReadMagic(path), magic);
+    auto stored = static_cast<int64_t>(std::filesystem::file_size(path));
+    EXPECT_EQ(data_file.file_size_in_bytes, stored);
+    ICEBERG_UNWRAP_OR_FAIL(auto key_metadata,
+                           StandardKeyMetadata::Parse(data_file.key_metadata));
+    EXPECT_EQ(key_metadata.file_length, stored);
+
+    // Read it back as scans do: Parquet with the key metadata, Avro through the view
+    ReaderOptions options{.path = path,
+                          .length = static_cast<size_t>(stored),
+                          .io = fixture.io,
+                          .projection = schema_};
+    if (format == FileFormatType::kParquet) {
+      options.key_metadata = data_file.key_metadata;
+    } else {
+      ICEBERG_UNWRAP_OR_FAIL(
+          options.io, EncryptingFileIO::ForFile(fixture.io, data_file.key_metadata));
+    }
+    ICEBERG_UNWRAP_OR_FAIL(auto reader, ReaderFactoryRegistry::Open(format, options));
+    ICEBERG_UNWRAP_OR_FAIL(auto batch, reader->Next());
+    ASSERT_TRUE(batch.has_value());
+    EXPECT_EQ(batch->length, 3);
+    if (batch->release != nullptr) {
+      batch->release(&batch.value());
+    }
+  }
+}
+
+TEST_F(EncryptionWriteTest, WritesEncryptedPositionDeletes) {
+  ICEBERG_UNWRAP_OR_FAIL(auto fixture, JavaEncryptedTableFixture::Load(2));
+  auto path = CreateNewTempFilePath();
+  ICEBERG_UNWRAP_OR_FAIL(
+      auto writer, PositionDeleteWriter::Make({.path = path,
+                                               .schema = schema_,
+                                               .spec = PartitionSpec::Unpartitioned(),
+                                               .partition = PartitionValues{},
+                                               .io = fixture.io}));
+  ASSERT_THAT(writer->WriteDelete("/data/file.parquet", 7), IsOk());
+  ASSERT_THAT(writer->Close(), IsOk());
+  ICEBERG_UNWRAP_OR_FAIL(auto result, writer->Metadata());
+  const auto& delete_file = *result.data_files.front();
+  EXPECT_EQ(ReadMagic(path), "PARE");
+  ICEBERG_UNWRAP_OR_FAIL(auto key_metadata,
+                         StandardKeyMetadata::Parse(delete_file.key_metadata));
+  EXPECT_EQ(key_metadata.file_length,
+            static_cast<int64_t>(std::filesystem::file_size(path)));
 }
 
 }  // namespace iceberg

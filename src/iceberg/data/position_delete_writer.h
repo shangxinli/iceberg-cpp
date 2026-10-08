@@ -45,6 +45,8 @@ struct ICEBERG_DATA_EXPORT PositionDeleteWriterOptions {
   std::shared_ptr<PartitionSpec> spec;
   PartitionValues partition;
   FileFormatType format = FileFormatType::kParquet;
+  /// The FileIO of the table. With an encrypted table's EncryptingFileIO, the file is
+  /// encrypted and its key metadata recorded in the result.
   std::shared_ptr<FileIO> io;
   int64_t flush_threshold = 1000;  // Number of buffered deletes before auto-flush
   std::unordered_map<std::string, std::string> properties;

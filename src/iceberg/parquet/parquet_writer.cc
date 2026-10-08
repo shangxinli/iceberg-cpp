@@ -33,12 +33,15 @@
 #include <arrow/record_batch.h>
 #include <arrow/util/compression.h>
 #include <arrow/util/key_value_metadata.h>
+#include <arrow/util/secure_string.h>
 #include <parquet/arrow/writer.h>
+#include <parquet/encryption/encryption.h>
 #include <parquet/file_writer.h>
 #include <parquet/properties.h>
 
 #include "iceberg/arrow/arrow_io_internal.h"
 #include "iceberg/arrow/arrow_status_internal.h"
+#include "iceberg/encryption/standard_key_metadata.h"
 #include "iceberg/parquet/parquet_metrics_internal.h"
 #include "iceberg/parquet/parquet_schema_util_internal.h"
 #include "iceberg/schema_internal.h"
@@ -252,6 +255,22 @@ class ParquetWriter::Impl {
     properties_builder.max_row_group_length(max_row_group_rows);
     if (compression_level.has_value()) {
       properties_builder.compression_level(compression_level.value());
+    }
+    // Parquet modular encryption with the Iceberg data key as footer key (encrypted
+    // footer, "PARE"). Like Java, the AAD prefix is not stored in the file: readers get
+    // it from the key metadata in the manifest, which binds the file to its entry.
+    if (!options.key_metadata.empty()) {
+      ICEBERG_ASSIGN_OR_RAISE(auto key_metadata,
+                              StandardKeyMetadata::Parse(options.key_metadata));
+      ::parquet::FileEncryptionProperties::Builder encryption_builder(
+          ::arrow::util::SecureString(std::string(key_metadata.encryption_key.begin(),
+                                                  key_metadata.encryption_key.end())));
+      if (key_metadata.aad_prefix.has_value()) {
+        encryption_builder.aad_prefix(std::string(key_metadata.aad_prefix->begin(),
+                                                  key_metadata.aad_prefix->end()));
+        encryption_builder.disable_aad_prefix_storage();
+      }
+      properties_builder.encryption(encryption_builder.build());
     }
     auto writer_properties = properties_builder.memory_pool(pool_)->build();
     auto arrow_writer_properties = ::parquet::default_arrow_writer_properties();

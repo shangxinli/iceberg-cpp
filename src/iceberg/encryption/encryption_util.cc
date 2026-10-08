@@ -20,6 +20,7 @@
 #include "iceberg/encryption/encryption_util.h"
 
 #include "iceberg/encryption/encrypting_file_io.h"
+#include "iceberg/file_writer.h"
 #include "iceberg/table_metadata.h"
 #include "iceberg/table_properties.h"
 #include "iceberg/util/macros.h"
@@ -53,6 +54,31 @@ Status EncryptionUtil::ValidateProperties(const TableMetadata* base,
     }
   }
   return {};
+}
+
+Result<std::optional<StandardKeyMetadata>> EncryptionUtil::PrepareFileWrite(
+    FileFormatType format, WriterOptions& options) {
+  auto* encrypting_io = EncryptingFileIO::From(options.io);
+  if (encrypting_io == nullptr) {
+    return std::nullopt;
+  }
+  ICEBERG_ASSIGN_OR_RAISE(auto key_metadata,
+                          encrypting_io->encryption()->NewKeyMetadata());
+  if (format == FileFormatType::kParquet) {
+    // Parquet modular encryption; the file is written through the plain FileIO.
+    options.key_metadata = key_metadata.Serialize();
+  } else {
+    ICEBERG_ASSIGN_OR_RAISE(options.io, encrypting_io->ForEncryptedWrite(key_metadata));
+  }
+  return key_metadata;
+}
+
+std::vector<uint8_t> EncryptionUtil::FileKeyMetadata(
+    const std::optional<StandardKeyMetadata>& key_metadata, int64_t stored_length) {
+  if (!key_metadata.has_value()) {
+    return {};
+  }
+  return key_metadata->WithFileLength(stored_length).Serialize();
 }
 
 Result<std::shared_ptr<FileIO>> EncryptionUtil::MakeTableFileIO(

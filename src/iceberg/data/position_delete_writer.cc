@@ -46,7 +46,6 @@ namespace iceberg {
 class PositionDeleteWriter::Impl {
  public:
   static Result<std::unique_ptr<Impl>> Make(PositionDeleteWriterOptions options) {
-    ICEBERG_RETURN_UNEXPECTED(EncryptionUtil::CheckWriteSupported(options.io));
     auto delete_schema = std::make_shared<Schema>(std::vector<SchemaField>{
         MetadataColumns::kDeleteFilePath,
         MetadataColumns::kDeleteFilePos,
@@ -59,11 +58,14 @@ class PositionDeleteWriter::Impl {
         .properties = WriterProperties::FromMap(options.properties),
     };
 
+    ICEBERG_ASSIGN_OR_RAISE(auto key_metadata, EncryptionUtil::PrepareFileWrite(
+                                                   options.format, writer_options));
     ICEBERG_ASSIGN_OR_RAISE(auto writer,
                             WriterFactoryRegistry::Open(options.format, writer_options));
 
-    auto impl = std::unique_ptr<Impl>(
-        new Impl(std::move(options), std::move(delete_schema), std::move(writer)));
+    auto impl =
+        std::unique_ptr<Impl>(new Impl(std::move(options), std::move(delete_schema),
+                                       std::move(writer), std::move(key_metadata)));
     ICEBERG_RETURN_UNEXPECTED(impl->InitSchema());
     return impl;
   }
@@ -219,6 +221,8 @@ class PositionDeleteWriter::Impl {
             options_.spec ? std::make_optional(options_.spec->spec_id()) : std::nullopt,
     });
 
+    data_file->key_metadata = EncryptionUtil::FileKeyMetadata(key_metadata_, length);
+
     WriteResult result;
     result.data_files.push_back(std::move(data_file));
     result.referenced_data_files.assign(referenced_paths_.begin(),
@@ -228,10 +232,11 @@ class PositionDeleteWriter::Impl {
 
  private:
   Impl(PositionDeleteWriterOptions options, std::shared_ptr<Schema> delete_schema,
-       std::unique_ptr<Writer> writer)
+       std::unique_ptr<Writer> writer, std::optional<StandardKeyMetadata> key_metadata)
       : options_(std::move(options)),
         delete_schema_(std::move(delete_schema)),
-        writer_(std::move(writer)) {}
+        writer_(std::move(writer)),
+        key_metadata_(std::move(key_metadata)) {}
 
   Status InitSchema() {
     ICEBERG_RETURN_UNEXPECTED(ToArrowSchema(*delete_schema_, &arrow_schema_));
@@ -286,6 +291,8 @@ class PositionDeleteWriter::Impl {
   PositionDeleteWriterOptions options_;
   std::shared_ptr<Schema> delete_schema_;
   std::unique_ptr<Writer> writer_;
+  // Set when the file is encrypted.
+  std::optional<StandardKeyMetadata> key_metadata_;
   // The immutable delete schema in Arrow form, paired with the view bound to it.
   // Declared before the view and released after it in the destructor.
   ArrowSchema arrow_schema_{};

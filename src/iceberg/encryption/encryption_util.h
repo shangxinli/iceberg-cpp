@@ -25,7 +25,10 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
+#include "iceberg/encryption/standard_key_metadata.h"
+#include "iceberg/file_format.h"
 #include "iceberg/iceberg_export.h"
 #include "iceberg/result.h"
 #include "iceberg/type_fwd.h"
@@ -34,6 +37,7 @@ namespace iceberg {
 
 class FileIO;
 class KeyManagementClient;
+struct WriterOptions;
 
 /// \brief Table-level encryption helpers.
 struct ICEBERG_EXPORT EncryptionUtil {
@@ -47,6 +51,21 @@ struct ICEBERG_EXPORT EncryptionUtil {
   /// \param base the previous metadata, or nullptr for a new table
   static Status ValidateProperties(const TableMetadata* base,
                                    const TableMetadata& metadata);
+
+  /// \brief Set up encryption for a new data or delete file.
+  ///
+  /// If `options.io` is the FileIO of an encrypted table, generates key metadata and
+  /// configures the write: Parquet files are encrypted natively (options.key_metadata),
+  /// other formats are written as AES GCM streams (options.io). Otherwise a no-op.
+  ///
+  /// \return the key metadata of the file, or nullopt if it is not encrypted
+  static Result<std::optional<StandardKeyMetadata>> PrepareFileWrite(
+      FileFormatType format, WriterOptions& options);
+
+  /// \brief The key_metadata to record for a written file: its key metadata with the
+  /// stored length (as Java), or empty if it is not encrypted.
+  static std::vector<uint8_t> FileKeyMetadata(
+      const std::optional<StandardKeyMetadata>& key_metadata, int64_t stored_length);
 
   /// \brief The FileIO of a table, for catalogs.
   ///

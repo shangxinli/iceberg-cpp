@@ -85,6 +85,9 @@ struct ICEBERG_EXPORT WriterOptions {
   std::shared_ptr<MetricsConfig> metrics_config = MetricsConfig::Default();
   /// \brief Format-specific or implementation-specific properties.
   WriterProperties properties;
+  /// \brief Serialized StandardKeyMetadata for formats with native encryption
+  /// (Parquet modular encryption). Empty for plaintext files.
+  std::vector<uint8_t> key_metadata;
 };
 
 /// \brief Base writer class to write data from different file formats.
