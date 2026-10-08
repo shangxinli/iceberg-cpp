@@ -244,8 +244,12 @@ class AvroWriter::Impl {
   Status Close() {
     if (!backend_->Closed()) {
       backend_->Close();
-      ICEBERG_ARROW_ASSIGN_OR_RETURN(total_bytes_, arrow_output_stream_->Tell());
+      ICEBERG_ARROW_ASSIGN_OR_RETURN(auto written, arrow_output_stream_->Tell());
       ICEBERG_ARROW_RETURN_NOT_OK(arrow_output_stream_->Close());
+      // The stored length: for AES GCM streams, the encrypted size recorded in manifests
+      // and key metadata.
+      ICEBERG_ASSIGN_OR_RAISE(total_bytes_,
+                              arrow::StoredLength(*arrow_output_stream_, written));
     }
     return {};
   }

@@ -51,6 +51,14 @@ ICEBERG_BUNDLE_EXPORT Result<std::shared_ptr<::arrow::io::OutputStream>>
 OpenArrowOutputStream(const std::shared_ptr<FileIO>& io, const std::string& path,
                       bool overwrite = true);
 
+/// \brief The number of bytes stored for a stream from OpenArrowOutputStream.
+///
+/// For streams of a FileIO this is PositionOutputStream::StoredLength(), which differs
+/// from the bytes written for encrypting (AES GCM) streams; otherwise it is
+/// `written_length`. Call after the stream is closed.
+ICEBERG_BUNDLE_EXPORT Result<int64_t> StoredLength(
+    const ::arrow::io::OutputStream& stream, int64_t written_length);
+
 /// \brief A concrete implementation of FileIO for Arrow file system.
 class ICEBERG_BUNDLE_EXPORT ArrowFileSystemFileIO : public FileIO {
  public:

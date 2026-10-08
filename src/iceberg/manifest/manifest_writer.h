@@ -27,6 +27,7 @@
 #include <string>
 #include <vector>
 
+#include "iceberg/encryption/encrypting_file_io.h"
 #include "iceberg/file_writer.h"
 #include "iceberg/iceberg_export.h"
 #include "iceberg/manifest/manifest_list.h"
@@ -143,7 +144,8 @@ class ICEBERG_EXPORT ManifestWriter {
   // instead.
   ManifestWriter(std::unique_ptr<Writer> writer,
                  std::unique_ptr<class ManifestEntryAdapter> adapter,
-                 std::string_view manifest_location, std::optional<int64_t> first_row_id);
+                 std::string_view manifest_location, std::optional<int64_t> first_row_id,
+                 std::optional<StandardKeyMetadata> key_metadata = std::nullopt);
 
   Status CheckDataFile(const DataFile& file) const;
 
@@ -153,6 +155,9 @@ class ICEBERG_EXPORT ManifestWriter {
   bool closed_{false};
   std::string manifest_location_;
   std::optional<int64_t> first_row_id_;
+  // Set when the table is encrypted: the manifest is an AES GCM stream whose key
+  // metadata (with the stored file length) goes to the manifest list.
+  std::optional<StandardKeyMetadata> key_metadata_;
 
   int32_t add_files_count_{0};
   int32_t existing_files_count_{0};
@@ -189,6 +194,10 @@ class ICEBERG_EXPORT ManifestListWriter {
   /// \brief Get the next row id to assign.
   std::optional<int64_t> next_row_id() const;
 
+  /// \brief For encrypted tables, register the manifest list key metadata and return
+  /// the keys to add to table metadata with the snapshot. Requires a closed writer.
+  Result<std::optional<ManifestListEncryptionKeys>> EncryptionKeys();
+
   /// \brief Factory function to create a writer for the manifest list based on format
   /// version.
   /// \param format_version The format version (1, 2, 3, etc.).
@@ -211,11 +220,18 @@ class ICEBERG_EXPORT ManifestListWriter {
   // Private constructor for internal use only, use the static Make*Writer methods
   // instead.
   ManifestListWriter(std::unique_ptr<Writer> writer,
-                     std::unique_ptr<class ManifestFileAdapter> adapter);
+                     std::unique_ptr<class ManifestFileAdapter> adapter,
+                     std::shared_ptr<EncryptingFileIO> encrypting_io,
+                     std::optional<StandardKeyMetadata> key_metadata);
 
   static constexpr int64_t kBatchSize = 1024;
   std::unique_ptr<Writer> writer_;
   std::unique_ptr<class ManifestFileAdapter> adapter_;
+  // Set when the table is encrypted.
+  std::shared_ptr<EncryptingFileIO> encrypting_io_;
+  std::optional<StandardKeyMetadata> key_metadata_;
+  std::optional<ManifestListEncryptionKeys> encryption_keys_;
+  bool closed_{false};
 };
 
 }  // namespace iceberg

@@ -359,6 +359,9 @@ Status Transaction::ApplyUpdateSnapshot(SnapshotUpdate& update) {
 
   // Create a temp builder to check if this is an empty update
   auto temp_update = TableMetadataBuilder::BuildFrom(&base);
+  for (auto& key : result.encryption_keys) {
+    temp_update->AddEncryptionKey(std::move(key));
+  }
   if (base.SnapshotById(result.snapshot->snapshot_id).has_value()) {
     // This is a rollback operation
     temp_update->SetBranchSnapshot(result.snapshot->snapshot_id, result.target_branch);

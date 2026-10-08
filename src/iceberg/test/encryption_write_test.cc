@@ -19,6 +19,9 @@
 
 /// Writing encrypted tables.
 
+#include <filesystem>
+#include <fstream>
+
 #include <gtest/gtest.h>
 
 #include "iceberg/avro/avro_register.h"
@@ -26,9 +29,13 @@
 #include "iceberg/data/data_writer.h"
 #include "iceberg/encryption/encryption_register.h"
 #include "iceberg/encryption/encryption_util.h"
+#include "iceberg/manifest/manifest_entry.h"
+#include "iceberg/manifest/manifest_reader.h"
+#include "iceberg/manifest/manifest_writer.h"
 #include "iceberg/parquet/parquet_register.h"
 #include "iceberg/partition_spec.h"
 #include "iceberg/schema.h"
+#include "iceberg/snapshot.h"
 #include "iceberg/sort_order.h"
 #include "iceberg/table.h"
 #include "iceberg/table_metadata.h"
@@ -169,6 +176,115 @@ TEST_F(EncryptionWriteTest, CatalogReadsEncryptedTable) {
   ICEBERG_UNWRAP_OR_FAIL(auto plain_builder, plain_table->NewScan());
   ICEBERG_UNWRAP_OR_FAIL(auto plain_scan, plain_builder->Build());
   EXPECT_THAT(plain_scan->PlanFiles(), IsError(ErrorKind::kNotSupported));
+}
+
+namespace {
+
+std::string ReadMagic(const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  std::string magic(4, '\0');
+  in.read(magic.data(), 4);
+  return magic;
+}
+
+}  // namespace
+
+TEST_F(EncryptionWriteTest, WritesEncryptedManifestsAndManifestLists) {
+  auto kms =
+      std::make_shared<InMemoryKms>(std::unordered_map<std::string, std::vector<uint8_t>>{
+          {"keyA", ReadEncryptionVector("master_key_keyA.bin")}});
+  ICEBERG_UNWRAP_OR_FAIL(auto manager, StandardEncryptionManager::Make(
+                                           {.table_key_id = "keyA", .kms = kms}));
+  std::shared_ptr<FileIO> local_io(arrow::MakeLocalFileIO());
+  auto io = std::make_shared<EncryptingFileIO>(local_io, manager);
+  auto spec = PartitionSpec::Unpartitioned();
+
+  // Manifest
+  auto manifest_path = CreateNewTempFilePath();
+  ICEBERG_UNWRAP_OR_FAIL(
+      auto writer, ManifestWriter::MakeWriter(3, /*snapshot_id=*/1, manifest_path, io,
+                                              spec, schema_, ManifestContent::kData,
+                                              /*first_row_id=*/0));
+  auto data_file = std::make_shared<DataFile>();
+  data_file->file_path = "/data/file.parquet";
+  data_file->file_format = FileFormatType::kParquet;
+  data_file->record_count = 3;
+  data_file->file_size_in_bytes = 1000;
+  data_file->key_metadata = {1, 2, 3};
+  ASSERT_THAT(writer->WriteAddedEntry(data_file), IsOk());
+  ASSERT_THAT(writer->Close(), IsOk());
+  ICEBERG_UNWRAP_OR_FAIL(auto manifest, writer->ToManifestFile());
+
+  EXPECT_EQ(ReadMagic(manifest_path), "AGS1");
+  auto stored = static_cast<int64_t>(std::filesystem::file_size(manifest_path));
+  EXPECT_EQ(manifest.manifest_length, stored);
+  ICEBERG_UNWRAP_OR_FAIL(auto key_metadata,
+                         StandardKeyMetadata::Parse(manifest.key_metadata));
+  EXPECT_EQ(key_metadata.file_length, stored);
+
+  ICEBERG_UNWRAP_OR_FAIL(auto reader, ManifestReader::Make(manifest, io, schema_, spec));
+  ICEBERG_UNWRAP_OR_FAIL(auto entries, reader->Entries());
+  ASSERT_EQ(entries.size(), 1);
+  EXPECT_EQ(entries[0].data_file->file_path, "/data/file.parquet");
+  EXPECT_EQ(entries[0].data_file->key_metadata, (std::vector<uint8_t>{1, 2, 3}));
+  // Not readable without the key
+  EXPECT_THAT(ManifestReader::Make(manifest, local_io, schema_, spec),
+              IsError(ErrorKind::kNotSupported));
+
+  // Manifest list
+  auto list_path = CreateNewTempFilePath();
+  ICEBERG_UNWRAP_OR_FAIL(auto list_writer, ManifestListWriter::MakeWriter(
+                                               3, /*snapshot_id=*/1, std::nullopt,
+                                               list_path, io, /*sequence_number=*/1,
+                                               /*first_row_id=*/0));
+  ASSERT_THAT(list_writer->Add(manifest), IsOk());
+  ASSERT_THAT(list_writer->Close(), IsOk());
+  ICEBERG_UNWRAP_OR_FAIL(auto keys, list_writer->EncryptionKeys());
+  ASSERT_TRUE(keys.has_value());
+  EXPECT_EQ(ReadMagic(list_path), "AGS1");
+
+  // A reader that only knows the committed keys
+  ICEBERG_UNWRAP_OR_FAIL(
+      auto reader_manager,
+      StandardEncryptionManager::Make(
+          {.table_key_id = "keyA",
+           .encryption_keys = {keys->key_encryption_key, keys->file_key},
+           .kms = kms}));
+  auto reader_io = std::make_shared<EncryptingFileIO>(local_io, reader_manager);
+  ICEBERG_UNWRAP_OR_FAIL(auto decrypted, reader_manager->DecryptManifestListKeyMetadata(
+                                             keys->file_key.key_id));
+  ICEBERG_UNWRAP_OR_FAIL(auto list_key_metadata, StandardKeyMetadata::Parse(decrypted));
+  EXPECT_EQ(list_key_metadata.file_length,
+            static_cast<int64_t>(std::filesystem::file_size(list_path)));
+
+  Snapshot snapshot{.snapshot_id = 1,
+                    .sequence_number = 1,
+                    .manifest_list = list_path,
+                    .key_id = keys->file_key.key_id};
+  ICEBERG_UNWRAP_OR_FAIL(auto list_reader, ManifestListReader::Make(snapshot, reader_io));
+  ICEBERG_UNWRAP_OR_FAIL(auto manifests, list_reader->Files());
+  ASSERT_EQ(manifests.size(), 1);
+  EXPECT_EQ(manifests[0].manifest_length, manifest.manifest_length);
+  EXPECT_EQ(manifests[0].key_metadata, manifest.key_metadata);
+}
+
+TEST_F(EncryptionWriteTest, PlainManifestLengthIsUnchanged) {
+  std::shared_ptr<FileIO> local_io(arrow::MakeLocalFileIO());
+  auto manifest_path = CreateNewTempFilePath();
+  ICEBERG_UNWRAP_OR_FAIL(
+      auto writer, ManifestWriter::MakeWriter(2, 1, manifest_path, local_io,
+                                              PartitionSpec::Unpartitioned(), schema_));
+  auto data_file = std::make_shared<DataFile>();
+  data_file->file_path = "/data/file.parquet";
+  data_file->file_format = FileFormatType::kParquet;
+  data_file->record_count = 3;
+  data_file->file_size_in_bytes = 1000;
+  ASSERT_THAT(writer->WriteAddedEntry(data_file), IsOk());
+  ASSERT_THAT(writer->Close(), IsOk());
+  ICEBERG_UNWRAP_OR_FAIL(auto manifest, writer->ToManifestFile());
+  EXPECT_TRUE(manifest.key_metadata.empty());
+  EXPECT_EQ(manifest.manifest_length,
+            static_cast<int64_t>(std::filesystem::file_size(manifest_path)));
 }
 
 }  // namespace iceberg

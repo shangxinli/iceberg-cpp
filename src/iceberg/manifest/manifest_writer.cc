@@ -35,14 +35,35 @@
 
 namespace iceberg {
 
+namespace {
+
+/// \brief For an encrypted table, generate key metadata for a new AES GCM stream file
+/// and return the FileIO view that encrypts with it.
+Result<std::pair<std::shared_ptr<FileIO>, std::optional<StandardKeyMetadata>>>
+PrepareEncryptedWrite(const std::shared_ptr<EncryptingFileIO>& encrypting_io,
+                      std::shared_ptr<FileIO> file_io) {
+  if (encrypting_io == nullptr) {
+    return std::make_pair(std::move(file_io), std::optional<StandardKeyMetadata>{});
+  }
+  ICEBERG_ASSIGN_OR_RAISE(auto key_metadata,
+                          encrypting_io->encryption()->NewKeyMetadata());
+  ICEBERG_ASSIGN_OR_RAISE(auto view, encrypting_io->ForEncryptedWrite(key_metadata));
+  return std::make_pair(std::move(view),
+                        std::optional<StandardKeyMetadata>(std::move(key_metadata)));
+}
+
+}  // namespace
+
 ManifestWriter::ManifestWriter(std::unique_ptr<Writer> writer,
                                std::unique_ptr<ManifestEntryAdapter> adapter,
                                std::string_view manifest_location,
-                               std::optional<int64_t> first_row_id)
+                               std::optional<int64_t> first_row_id,
+                               std::optional<StandardKeyMetadata> key_metadata)
     : writer_(std::move(writer)),
       adapter_(std::move(adapter)),
       manifest_location_(manifest_location),
       first_row_id_(first_row_id),
+      key_metadata_(std::move(key_metadata)),
       partition_summary_(
           std::make_unique<PartitionSummary>(*adapter_->partition_type())) {}
 
@@ -211,6 +232,10 @@ Status ManifestWriter::Close() {
   }
   ICEBERG_RETURN_UNEXPECTED(writer_->Close());
   closed_ = true;
+  if (key_metadata_.has_value()) {
+    // The writer reports the stored (encrypted) length once closed.
+    ICEBERG_ASSIGN_OR_RAISE(key_metadata_->file_length, writer_->length());
+  }
   return {};
 }
 
@@ -227,6 +252,12 @@ Result<ManifestFile> ManifestWriter::ToManifestFile() const {
 
   ICEBERG_ASSIGN_OR_RAISE(auto partitions, partition_summary_->Summaries());
   ICEBERG_ASSIGN_OR_RAISE(auto manifest_length, writer_->length());
+  // manifest_length is the stored length, which for encrypted manifests is the
+  // encrypted size (as in Java).
+  std::vector<uint8_t> key_metadata;
+  if (key_metadata_.has_value()) {
+    key_metadata = key_metadata_->Serialize();
+  }
 
   return ManifestFile{
       .manifest_path = manifest_location_,
@@ -247,6 +278,7 @@ Result<ManifestFile> ManifestWriter::ToManifestFile() const {
       .existing_rows_count = existing_rows_count_,
       .deleted_rows_count = delete_rows_count_,
       .partitions = std::move(partitions),
+      .key_metadata = std::move(key_metadata),
       .first_row_id = first_row_id_,
   };
 }
@@ -309,18 +341,27 @@ Result<std::unique_ptr<ManifestWriter>> ManifestWriter::MakeWriter(
   ICEBERG_RETURN_UNEXPECTED(adapter->Init());
   ICEBERG_RETURN_UNEXPECTED(adapter->StartAppending());
 
+  auto encrypting_io = std::dynamic_pointer_cast<EncryptingFileIO>(file_io);
+  ICEBERG_ASSIGN_OR_RAISE(auto prepared,
+                          PrepareEncryptedWrite(encrypting_io, std::move(file_io)));
   auto schema = adapter->schema();
   ICEBERG_ASSIGN_OR_RAISE(
       auto writer,
-      OpenFileWriter(manifest_location, std::move(schema), std::move(file_io),
+      OpenFileWriter(manifest_location, std::move(schema), std::move(prepared.first),
                      adapter->metadata(), "manifest_entry"));
-  return std::unique_ptr<ManifestWriter>(new ManifestWriter(
-      std::move(writer), std::move(adapter), manifest_location, writer_first_row_id));
+  return std::unique_ptr<ManifestWriter>(
+      new ManifestWriter(std::move(writer), std::move(adapter), manifest_location,
+                         writer_first_row_id, std::move(prepared.second)));
 }
 
 ManifestListWriter::ManifestListWriter(std::unique_ptr<Writer> writer,
-                                       std::unique_ptr<ManifestFileAdapter> adapter)
-    : writer_(std::move(writer)), adapter_(std::move(adapter)) {}
+                                       std::unique_ptr<ManifestFileAdapter> adapter,
+                                       std::shared_ptr<EncryptingFileIO> encrypting_io,
+                                       std::optional<StandardKeyMetadata> key_metadata)
+    : writer_(std::move(writer)),
+      adapter_(std::move(adapter)),
+      encrypting_io_(std::move(encrypting_io)),
+      key_metadata_(std::move(key_metadata)) {}
 
 ManifestListWriter::~ManifestListWriter() = default;
 
@@ -345,11 +386,27 @@ Status ManifestListWriter::Close() {
     ICEBERG_ASSIGN_OR_RAISE(auto array, adapter_->FinishAppending());
     ICEBERG_RETURN_UNEXPECTED(writer_->Write(array));
   }
-  return writer_->Close();
+  ICEBERG_RETURN_UNEXPECTED(writer_->Close());
+  closed_ = true;
+  return {};
 }
 
 std::optional<int64_t> ManifestListWriter::next_row_id() const {
   return adapter_->next_row_id();
+}
+
+Result<std::optional<ManifestListEncryptionKeys>> ManifestListWriter::EncryptionKeys() {
+  ICEBERG_PRECHECK(closed_, "Cannot build encryption keys, writer is not closed");
+  if (!key_metadata_.has_value()) {
+    return std::nullopt;
+  }
+  if (!encryption_keys_.has_value()) {
+    ICEBERG_ASSIGN_OR_RAISE(key_metadata_->file_length, writer_->length());
+    ICEBERG_ASSIGN_OR_RAISE(
+        encryption_keys_,
+        encrypting_io_->encryption()->RegisterManifestListKeyMetadata(*key_metadata_));
+  }
+  return encryption_keys_;
 }
 
 Result<std::unique_ptr<ManifestListWriter>> ManifestListWriter::MakeWriter(
@@ -386,13 +443,17 @@ Result<std::unique_ptr<ManifestListWriter>> ManifestListWriter::MakeWriter(
   ICEBERG_RETURN_UNEXPECTED(adapter->Init());
   ICEBERG_RETURN_UNEXPECTED(adapter->StartAppending());
 
+  auto encrypting_io = std::dynamic_pointer_cast<EncryptingFileIO>(file_io);
+  ICEBERG_ASSIGN_OR_RAISE(auto prepared,
+                          PrepareEncryptedWrite(encrypting_io, std::move(file_io)));
   auto schema = adapter->schema();
   ICEBERG_ASSIGN_OR_RAISE(
       auto writer,
-      OpenFileWriter(manifest_list_location, std::move(schema), std::move(file_io),
+      OpenFileWriter(manifest_list_location, std::move(schema), std::move(prepared.first),
                      adapter->metadata(), "manifest_file"));
   return std::unique_ptr<ManifestListWriter>(
-      new ManifestListWriter(std::move(writer), std::move(adapter)));
+      new ManifestListWriter(std::move(writer), std::move(adapter),
+                             std::move(encrypting_io), std::move(prepared.second)));
 }
 
 }  // namespace iceberg

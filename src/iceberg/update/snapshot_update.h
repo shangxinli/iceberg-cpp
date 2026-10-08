@@ -33,6 +33,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "iceberg/encryption/encrypted_key.h"
 #include "iceberg/iceberg_export.h"
 #include "iceberg/result.h"
 #include "iceberg/snapshot.h"
@@ -54,6 +55,9 @@ class ICEBERG_EXPORT SnapshotUpdate : public PendingUpdate {
     std::shared_ptr<Snapshot> snapshot;
     std::string target_branch;
     bool stage_only = false;
+    /// Encryption keys referenced by the snapshot (key encryption key and manifest
+    /// list key); must be committed together with it.
+    std::vector<EncryptedKey> encryption_keys;
   };
 
   ~SnapshotUpdate() override;

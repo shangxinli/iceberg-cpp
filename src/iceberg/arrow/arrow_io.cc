@@ -222,6 +222,13 @@ class OutputStreamAdapter : public ::arrow::io::OutputStream {
     OutputStream::set_mode(::arrow::io::FileMode::WRITE);
   }
 
+  /// \brief Bytes stored by the underlying stream; differs from Tell() for encrypting
+  /// streams. Valid after Close().
+  Result<int64_t> StoredLength() const {
+    std::lock_guard lock(mutex_);
+    return output_->StoredLength();
+  }
+
   ::arrow::Status Close() override {
     std::lock_guard lock(mutex_);
     if (closed_) {
@@ -547,6 +554,14 @@ Result<std::shared_ptr<::arrow::io::RandomAccessFile>> OpenArrowInputStream(
   }
   ICEBERG_ASSIGN_OR_RAISE(auto input, input_file->Open());
   return std::make_shared<InputStreamAdapter>(std::move(input), size);
+}
+
+Result<int64_t> StoredLength(const ::arrow::io::OutputStream& stream,
+                             int64_t written_length) {
+  if (const auto* adapter = dynamic_cast<const OutputStreamAdapter*>(&stream)) {
+    return adapter->StoredLength();
+  }
+  return written_length;
 }
 
 Result<std::shared_ptr<::arrow::io::OutputStream>> OpenArrowOutputStream(

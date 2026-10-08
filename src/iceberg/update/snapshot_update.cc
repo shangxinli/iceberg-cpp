@@ -347,6 +347,9 @@ Result<SnapshotUpdate::ApplyResult> SnapshotUpdate::Apply() {
                                                   base().next_row_id));
   ICEBERG_RETURN_UNEXPECTED(writer->AddAll(manifests));
   ICEBERG_RETURN_UNEXPECTED(writer->Close());
+  // For encrypted tables: the key encryption key and the encrypted manifest list key
+  // metadata, committed with the snapshot.
+  ICEBERG_ASSIGN_OR_RAISE(auto manifest_list_keys, writer->EncryptionKeys());
 
   std::optional<int64_t> next_row_id;
   std::optional<int64_t> assigned_rows;
@@ -378,15 +381,23 @@ Result<SnapshotUpdate::ApplyResult> SnapshotUpdate::Apply() {
 
   ICEBERG_ASSIGN_OR_RAISE(auto summary, ComputeSummary(base()));
   ICEBERG_ASSIGN_OR_RAISE(
-      staged_snapshot_,
+      auto snapshot,
       Snapshot::Make(sequence_number, SnapshotId(), parent_snapshot_id,
                      CurrentTimePointMs(), std::move(op), std::move(summary),
                      base().current_schema_id, std::move(manifest_list_path), next_row_id,
                      assigned_rows));
+  std::vector<EncryptedKey> encryption_keys;
+  if (manifest_list_keys.has_value()) {
+    snapshot->key_id = manifest_list_keys->file_key.key_id;
+    encryption_keys = {manifest_list_keys->key_encryption_key,
+                       manifest_list_keys->file_key};
+  }
+  staged_snapshot_ = std::move(snapshot);
 
   return ApplyResult{.snapshot = staged_snapshot_,
                      .target_branch = target_branch_,
-                     .stage_only = stage_only_};
+                     .stage_only = stage_only_,
+                     .encryption_keys = std::move(encryption_keys)};
 }
 
 Status SnapshotUpdate::Finalize([[maybe_unused]] const TableMetadata& metadata) {
