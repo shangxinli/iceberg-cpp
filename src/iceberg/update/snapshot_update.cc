@@ -26,6 +26,7 @@
 
 #include "iceberg/constants.h"
 #include "iceberg/encryption/encrypting_file_io.h"
+#include "iceberg/encryption/encryption_util.h"
 #include "iceberg/file_io.h"
 #include "iceberg/inheritable_metadata.h"
 #include "iceberg/logging/log_macros.h"
@@ -314,6 +315,7 @@ int64_t SnapshotUpdate::SnapshotId() {
 Result<SnapshotUpdate::ApplyResult> SnapshotUpdate::Apply() {
   commit_metrics_->attempts->Increment();
   ICEBERG_RETURN_UNEXPECTED(CheckErrors());
+  ICEBERG_RETURN_UNEXPECTED(EncryptionUtil::CheckWriteSupported(base()));
 
   ICEBERG_ASSIGN_OR_RAISE(auto parent_snapshot,
                           SnapshotUtil::OptionalLatestSnapshot(base(), target_branch_));

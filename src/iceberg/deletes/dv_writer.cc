@@ -32,6 +32,7 @@
 #include "iceberg/deletes/dv_util_internal.h"
 #include "iceberg/deletes/position_delete_index.h"
 #include "iceberg/deletes/roaring_position_bitmap.h"
+#include "iceberg/encryption/encryption_util.h"
 #include "iceberg/file_format.h"
 #include "iceberg/file_io.h"  // IWYU pragma: keep
 #include "iceberg/manifest/manifest_entry.h"
@@ -207,6 +208,7 @@ DVWriter::~DVWriter() = default;
 Result<std::unique_ptr<DVWriter>> DVWriter::Make(DVWriterOptions options) {
   ICEBERG_PRECHECK(!options.path.empty(), "DVWriter requires an output path");
   ICEBERG_PRECHECK(options.io != nullptr, "DVWriter requires a FileIO");
+  ICEBERG_RETURN_UNEXPECTED(EncryptionUtil::CheckWriteSupported(options.io));
   ICEBERG_PRECHECK(options.load_previous_deletes != nullptr,
                    "DVWriter requires a load_previous_deletes callback");
   return std::unique_ptr<DVWriter>(

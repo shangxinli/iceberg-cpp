@@ -31,6 +31,7 @@
 
 #include "iceberg/arrow_c_data_guard_internal.h"
 #include "iceberg/data/writer.h"  // IWYU pragma: keep
+#include "iceberg/encryption/encryption_util.h"
 #include "iceberg/file_writer.h"
 #include "iceberg/manifest/manifest_entry.h"
 #include "iceberg/metadata_columns.h"
@@ -45,6 +46,7 @@ namespace iceberg {
 class PositionDeleteWriter::Impl {
  public:
   static Result<std::unique_ptr<Impl>> Make(PositionDeleteWriterOptions options) {
+    ICEBERG_RETURN_UNEXPECTED(EncryptionUtil::CheckWriteSupported(options.io));
     auto delete_schema = std::make_shared<Schema>(std::vector<SchemaField>{
         MetadataColumns::kDeleteFilePath,
         MetadataColumns::kDeleteFilePos,

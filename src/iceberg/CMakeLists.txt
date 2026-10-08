@@ -34,6 +34,7 @@ set(ICEBERG_SOURCES
     deletes/roaring_position_bitmap.cc
     encryption/encrypting_file_io.cc
     encryption/encryption_manager.cc
+    encryption/encryption_util.cc
     encryption/key_management_client.cc
     encryption/standard_key_metadata.cc
     expression/aggregate.cc

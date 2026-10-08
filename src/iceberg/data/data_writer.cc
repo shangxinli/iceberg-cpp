@@ -23,6 +23,7 @@
 #include <utility>
 
 #include "iceberg/data/writer.h"  // IWYU pragma: keep
+#include "iceberg/encryption/encryption_util.h"
 #include "iceberg/file_writer.h"
 #include "iceberg/manifest/manifest_entry.h"
 #include "iceberg/partition_spec.h"
@@ -33,6 +34,7 @@ namespace iceberg {
 class DataWriter::Impl {
  public:
   static Result<std::unique_ptr<Impl>> Make(DataWriterOptions options) {
+    ICEBERG_RETURN_UNEXPECTED(EncryptionUtil::CheckWriteSupported(options.io));
     WriterOptions writer_options{
         .path = options.path,
         .schema = options.schema,
