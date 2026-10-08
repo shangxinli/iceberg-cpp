@@ -226,6 +226,10 @@ if(ICEBERG_BUILD_BUNDLE)
     target_sources(parquet_test PRIVATE parquet_encryption_test.cc)
   endif()
 
+  if(ICEBERG_ENCRYPTION)
+    add_iceberg_test(crypto_test USE_BUNDLE SOURCES aes_gcm_test.cc)
+  endif()
+
   add_iceberg_test(scan_test
                    USE_BUNDLE
                    SOURCES
