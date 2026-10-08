@@ -19,6 +19,8 @@
 
 #include <memory>
 
+#include <nlohmann/json.hpp>
+
 #include "iceberg/json_serde_internal.h"
 #include "iceberg/manifest/manifest_entry.h"
 #include "iceberg/manifest/manifest_list.h"
@@ -76,7 +78,9 @@ std::shared_ptr<StructType> ManifestEntryAdapterV1::DataFileSchema(
 
 Status ManifestEntryAdapterV1::Init() {
   ICEBERG_ASSIGN_OR_RAISE(metadata_["schema"], ToJsonString(*current_schema_))
-  ICEBERG_ASSIGN_OR_RAISE(metadata_["partition-spec"], ToJsonString(*partition_spec_));
+  // The spec stores only the partition fields array.
+  ICEBERG_ASSIGN_OR_RAISE(metadata_["partition-spec"],
+                          ToJsonString(ToJson(*partition_spec_)["fields"]));
   metadata_["partition-spec-id"] = std::to_string(partition_spec_->spec_id());
   metadata_["format-version"] = "1";
 
